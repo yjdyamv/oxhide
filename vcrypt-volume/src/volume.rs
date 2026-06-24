@@ -12,6 +12,8 @@ pub struct OpenVolume {
     file: File,
     cipher: Box<dyn SectorCipher>,
     read_only: bool,
+    protected_range: Option<(u64, u64)>,
+    hidden_protection_triggered: bool,
 }
 
 impl OpenVolume {
@@ -40,6 +42,8 @@ impl OpenVolume {
             file,
             cipher,
             read_only: false,
+            protected_range: None,
+            hidden_protection_triggered: false,
         })
     }
 
@@ -68,6 +72,8 @@ impl OpenVolume {
             file,
             cipher,
             read_only: true,
+            protected_range: None,
+            hidden_protection_triggered: false,
         })
     }
 
@@ -90,10 +96,18 @@ impl OpenVolume {
         if self.read_only {
             return Err(VolumeError::Unsupported("volume opened read-only".into()));
         }
+        if self.hidden_protection_triggered {
+            return Err(VolumeError::HiddenVolumeProtection);
+        }
         if buf.len() % DATA_UNIT_SIZE as usize != 0 {
             return Err(VolumeError::Unsupported(
                 "write buffer must be sector-aligned (multiple of 512)".into(),
             ));
+        }
+        let host_offset = self.inner.data_offset + sector * DATA_UNIT_SIZE;
+        if self.check_protected_range(host_offset, buf.len() as u64) {
+            self.hidden_protection_triggered = true;
+            return Err(VolumeError::HiddenVolumeProtection);
         }
         io::write_sectors(
             &mut self.file,
@@ -131,6 +145,69 @@ impl OpenVolume {
 
     pub fn used_backup_header(&self) -> bool {
         self.inner.used_backup_header
+    }
+
+    pub fn volume_type(&self) -> crate::layout::VolumeType {
+        self.inner.volume_type
+    }
+
+    /// Open an outer volume with hidden volume write protection.
+    ///
+    /// The outer volume is opened normally; the hidden volume password is
+    /// used to locate and protect (but not mount) the hidden region.
+    /// Writes that would overlap the hidden volume are rejected.
+    pub fn open_with_protection(
+        path: &str,
+        outer_password: &[u8],
+        outer_keyfiles: &[&str],
+        outer_kdf: Option<KdfAlgorithm>,
+        outer_pim: Option<i32>,
+        hidden_password: &[u8],
+        hidden_keyfiles: &[&str],
+    ) -> VolResult<Self> {
+        let outer_result = match outer_kdf {
+            Some(k) => open_volume_file_with_kdf(path, outer_password, outer_keyfiles, k, outer_pim.unwrap_or(0)),
+            None => open_volume_file(path, outer_password, outer_keyfiles, outer_pim),
+        }?;
+
+        if outer_result.volume_type != crate::layout::VolumeType::Normal {
+            return Err(VolumeError::Unsupported("Outer volume appears to be hidden (wrong password?)".into()));
+        }
+
+        // Open hidden header to get its data range
+        let hidden_result = open_volume_file(path, hidden_password, hidden_keyfiles, Some(0))?;
+
+        if hidden_result.volume_type != crate::layout::VolumeType::Hidden {
+            return Err(VolumeError::AuthFailed("Hidden volume not found (wrong password?)".into()));
+        }
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| VolumeError::OpenError(format!("{}", e)))?;
+
+        let cipher = create_sector_cipher(outer_result.data_cipher, &outer_result.master_key)?;
+
+        Ok(OpenVolume {
+            inner: outer_result,
+            file,
+            cipher,
+            read_only: false,
+            protected_range: Some((hidden_result.data_offset, hidden_result.data_offset + hidden_result.data_length)),
+            hidden_protection_triggered: false,
+        })
+    }
+
+    /// Check if a write at `host_offset` covering `length` bytes would
+    /// overlap the protected hidden volume range.
+    fn check_protected_range(&self, host_offset: u64, length: u64) -> bool {
+        if let Some((start, end)) = self.protected_range {
+            let write_end = host_offset + length;
+            host_offset < end && write_end > start
+        } else {
+            false
+        }
     }
 }
 

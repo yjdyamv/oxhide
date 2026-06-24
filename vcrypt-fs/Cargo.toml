@@ -1,0 +1,16 @@
+[package]
+name = "vcrypt-fs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winfsp_wrs = "0.4.1"
+windows-sys = { version = "0.61", features = ["Win32_System_IO", "Win32_UI_Shell", "Win32_Storage_FileSystem"] }
+
+[dependencies]
+vcrypt-volume = { path = "../vcrypt-volume" }
+vcrypt-core = { path = "../vcrypt-core" }
+parking_lot = "0.12"
+log = { workspace = true }

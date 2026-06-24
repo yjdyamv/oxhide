@@ -60,10 +60,41 @@ enum Commands {
         #[arg(short = 'c', long, default_value = "1")]
         count: u64,
     },
+    CreateHidden {
+        #[arg(short = 'o', long)]
+        outer: String,
+        #[arg(short, long)]
+        size: Option<String>,
+        #[arg(short, long, default_value = "aes-twofish")]
+        cipher: String,
+        #[arg(short = 'k', long, default_value = "argon2")]
+        kdf: String,
+        #[arg(short = 'm', long, default_value = "0")]
+        pim: i32,
+        #[arg(short, long)]
+        password: Option<String>,
+        #[arg(short = 'f', long)]
+        keyfile: Vec<String>,
+    },
     Test,
     Benchmark {
         #[arg(default_value = "all")]
         kind: String,
+    },
+    Mount {
+        volume: String,
+        #[arg(short, long)]
+        mountpoint: String,
+        #[arg(short, long)]
+        password: Option<String>,
+        #[arg(short = 'k', long)]
+        kdf: Option<String>,
+        #[arg(short = 'm', long)]
+        pim: Option<i32>,
+        #[arg(short = 'f', long)]
+        keyfile: Vec<String>,
+        #[arg(short = 'r', long)]
+        read_only: bool,
     },
     Change {
         volume: String,
@@ -101,6 +132,9 @@ fn main() {
         Commands::Create { volume, size, cipher, kdf, pim, password, keyfile } => {
             cmd_create(&volume, size.as_deref(), &cipher, &kdf, pim, password, &keyfile);
         }
+        Commands::CreateHidden { outer, size, cipher, kdf, pim, password, keyfile } => {
+            cmd_create_hidden(&outer, size.as_deref(), &cipher, &kdf, pim, password, &keyfile);
+        }
         Commands::Info { volume, backup } => {
             cmd_info(&volume, backup);
         }
@@ -115,6 +149,9 @@ fn main() {
         }
         Commands::Benchmark { kind } => {
             bench::run_benchmark(&kind);
+        }
+        Commands::Mount { volume, mountpoint, password, kdf, pim, keyfile, read_only } => {
+            cmd_mount(&volume, &mountpoint, password, kdf.as_deref(), pim, &keyfile, read_only);
         }
         Commands::Change { volume, password, new_password, kdf, pim, keyfile, new_keyfile } => {
             cmd_change(&volume, password, new_password, kdf.as_deref(), pim, &keyfile, &new_keyfile);
@@ -472,6 +509,109 @@ fn cmd_restore(
     match vcrypt_volume::restore_volume_header(&mut file, pw.as_bytes(), &kf, kdf_alg, pim) {
         Ok(()) => println!("    Status:    header restored from backup"),
         Err(e) => println!("    Error:     {}", e),
+    }
+}
+
+fn cmd_create_hidden(
+    outer: &str, size: Option<&str>, cipher_str: &str, kdf_str: &str,
+    pim: i32, password: Option<String>, keyfile: &[String],
+) {
+    println!("==> Creating hidden volume inside: {}", outer);
+    let size_str = size.unwrap_or("10M");
+    let hidden_size = parse_size(size_str);
+    println!("    Hidden size: {} ({} bytes)", size_str, hidden_size);
+    println!("    Cipher:      {}", cipher_str);
+    println!("    KDF:         {}", kdf_str);
+    println!("    PIM:         {}", pim);
+
+    let cipher = match parse_cipher(cipher_str) {
+        Some(c) => c,
+        None => { println!("    Error: unknown cipher '{}'", cipher_str); return; }
+    };
+    let kdf = match parse_kdf(kdf_str) {
+        Some(k) => k,
+        None => { println!("    Error: unknown KDF '{}'", kdf_str); return; }
+    };
+
+    let pw = password.unwrap_or_else(|| read_password("Hidden volume password: "));
+    if pw.is_empty() {
+        println!("    Error: empty password not allowed");
+        return;
+    }
+
+    let mut pw_bytes = pw.into_bytes();
+    if !keyfile.is_empty() {
+        let kf = keyfile_refs(keyfile);
+        if let Err(e) = vcrypt_format::keyfile::apply_keyfiles(&mut pw_bytes, &kf) {
+            println!("    Error: keyfile: {}", e);
+            return;
+        }
+    }
+
+    let mut file = match std::fs::OpenOptions::new().read(true).write(true).open(outer) {
+        Ok(f) => f,
+        Err(e) => { println!("    Error: cannot open outer volume: {}", e); return; }
+    };
+
+    use vcrypt_core::kdf::KeyDerivation;
+    let (kdf_impl, kdf_iterations): (Box<dyn KeyDerivation>, u32) = match kdf {
+        KdfAlgorithm::Argon2id => {
+            let (mem, t) = vcrypt_core::kdf::Argon2idKdf::params_for_pim(pim);
+            (Box::new(vcrypt_core::kdf::Argon2idKdf::new(mem, t, 1)), t)
+        }
+        _ => {
+            let imp: Box<dyn KeyDerivation> = match kdf {
+                KdfAlgorithm::Pbkdf2Sha512 => Box::new(vcrypt_core::kdf::Pbkdf2Sha512),
+                KdfAlgorithm::Pbkdf2Sha256 => Box::new(vcrypt_core::kdf::Pbkdf2Sha256),
+                KdfAlgorithm::Pbkdf2Blake2s => Box::new(vcrypt_core::kdf::Pbkdf2Blake2s),
+                KdfAlgorithm::Pbkdf2Whirlpool => Box::new(vcrypt_core::kdf::Pbkdf2Whirlpool),
+                KdfAlgorithm::Pbkdf2Streebog => Box::new(vcrypt_core::kdf::Pbkdf2Streebog),
+                _ => { println!("    Error: unsupported KDF"); return; }
+            };
+            let iters = imp.get_iteration_count(pim);
+            (imp, iters)
+        }
+    };
+
+    let progress: vcrypt_volume::create::ProgressFn = Box::new(|msg: &str| {
+        println!("    {}", msg);
+    });
+
+    match vcrypt_volume::create_hidden_volume(
+        &mut file, hidden_size, &pw_bytes,
+        cipher, kdf_impl.as_ref(), kdf, kdf_iterations, None,
+        Some(&progress),
+    ) {
+        Ok(()) => println!("    Status:   Hidden volume created successfully"),
+        Err(e) => println!("    Error:    {}", e),
+    }
+}
+
+fn cmd_mount(
+    volume: &str, mountpoint: &str, password: Option<String>,
+    kdf: Option<&str>, pim: Option<i32>, keyfile: &[String], read_only: bool,
+) {
+    println!("==> Mounting volume: {}", volume);
+    println!("    Mount:     {}", mountpoint);
+    if read_only { println!("    Mode:      read-only"); }
+
+    let pw = password.unwrap_or_else(|| read_password("Password: "));
+    let kf = keyfile_refs(keyfile);
+    let kdf_alg = kdf.and_then(parse_kdf);
+
+    println!("    Status:    mounting... (press Ctrl+C to unmount)");
+
+    #[cfg(windows)]
+    {
+        match vcrypt_fs::mount_volume(volume, pw.as_bytes(), &kf, kdf_alg, pim, mountpoint, read_only) {
+            Ok(()) => println!("    Status:    unmounted"),
+            Err(e) => println!("    Error:    {}", e),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (volume, mountpoint, pw, kf, kdf_alg, pim, read_only);
+        println!("    Error:    mounting only supported on Windows (WinFSP)");
     }
 }
 

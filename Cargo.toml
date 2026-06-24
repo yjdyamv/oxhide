@@ -4,6 +4,7 @@ members = [
     "vcrypt-format",
     "vcrypt-volume",
     "vcrypt-cli",
+    "vcrypt-fs",
 ]
 resolver = "2"
 

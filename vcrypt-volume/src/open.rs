@@ -1,7 +1,7 @@
 //! Volume opening — header decryption + key extraction
 
 use super::error::{VolResult, VolumeError};
-use super::layout::HeaderLayout;
+use super::layout::{HeaderLayout, VolumeType};
 use std::time::Instant;
 use vcrypt_core::ciphers::CipherType;
 use vcrypt_core::kdf::{
@@ -25,6 +25,7 @@ pub struct OpenResult {
     pub salt: [u8; PKCS5_SALT_SIZE],
     pub header: VolumeHeader,
     pub used_backup_header: bool,
+    pub volume_type: VolumeType,
 }
 
 pub(crate) struct KdfCandidate {
@@ -228,6 +229,7 @@ fn try_decrypt(
     }
 
     let master_key = header.master_keydata[..expected_key_bytes].to_vec();
+    let vol_type = if header.hidden_volume_size != 0 { VolumeType::Hidden } else { VolumeType::Normal };
 
     Ok(OpenResult {
         header_cipher,
@@ -246,6 +248,7 @@ fn try_decrypt(
         salt,
         header,
         used_backup_header: is_backup,
+        volume_type: vol_type,
     })
 }
 

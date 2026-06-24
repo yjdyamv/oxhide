@@ -16,3 +16,6 @@ env_logger = { workspace = true }
 zeroize = { workspace = true }
 hex = { workspace = true }
 rpassword = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+vcrypt-fs = { path = "../vcrypt-fs" }
