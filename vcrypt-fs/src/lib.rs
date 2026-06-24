@@ -32,8 +32,7 @@ impl EncryptedDisk {
         let sector_count = end_sector - start_sector;
 
         let mut sector_buf = vec![0u8; sector_count as usize * 512];
-        if let Err(e) = self.vol.lock().read(start_sector, &mut sector_buf) {
-            log::error!("vcrypt-fs read error: {}", e);
+        if let Err(_e) = self.vol.lock().read(start_sector, &mut sector_buf) {
             return 0;
         }
 
@@ -64,8 +63,7 @@ impl EncryptedDisk {
         let copy_len = max_write as usize;
         sector_buf[start_off..start_off + copy_len].copy_from_slice(&buf[..copy_len]);
 
-        if let Err(e) = self.vol.lock().write(start_sector, &sector_buf) {
-            log::error!("vcrypt-fs write error: {}", e);
+        if let Err(_e) = self.vol.lock().write(start_sector, &sector_buf) {
             return 0;
         }
         copy_len as u32

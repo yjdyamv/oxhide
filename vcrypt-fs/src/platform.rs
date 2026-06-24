@@ -1,130 +1,80 @@
-//! WinFSP-based virtual disk mounting for Windows (via winfsp_wrs).
+//! WinFSP-based virtual disk mounting for Windows (via winfsp crate).
 
 use super::EncryptedDisk;
 use std::sync::Arc;
 use vcrypt_core::kdf::KdfAlgorithm;
 use vcrypt_volume::OpenVolume;
-use winfsp_wrs::{
-    FileAccessRights, FileAttributes, FileInfo, FileSystem, FileSystemInterface,
-    OperationGuardStrategy, Params, VolumeInfo, VolumeParams, WriteMode,
-};
+use winfsp::filesystem::{FileInfo, FileSystemContext, OpenFileInfo, VolumeInfo};
+use winfsp::host::{FileSystemHost, VolumeParams};
+use winfsp::Result as FspResult;
 
 struct DiskFs {
     disk: Arc<EncryptedDisk>,
-    read_only: bool,
 }
 
-impl FileSystemInterface for DiskFs {
-    type FileContext = Arc<EncryptedDisk>;
+impl FileSystemContext for DiskFs {
+    type FileContext = ();
 
-    const GET_SECURITY_BY_NAME_DEFINED: bool = true;
     fn get_security_by_name(
         &self,
-        _file_name: &winfsp_wrs::U16CStr,
-        _find_reparse_point: impl Fn() -> Option<FileAttributes>,
-    ) -> Result<(FileAttributes, winfsp_wrs::PSecurityDescriptor, bool), windows_sys::Win32::Foundation::NTSTATUS> {
-        Ok((FileAttributes(0x80), winfsp_wrs::PSecurityDescriptor::default(), false))
+        _file_name: &winfsp::U16CStr,
+        _security_descriptor: Option<&mut [std::ffi::c_void]>,
+        _reparse_point_resolver: impl FnOnce(&winfsp::U16CStr) -> Option<winfsp::filesystem::FileSecurity>,
+    ) -> FspResult<winfsp::filesystem::FileSecurity> {
+        Ok(winfsp::filesystem::FileSecurity {
+            reparse: false,
+            sz_security_descriptor: 0,
+            attributes: 0,
+        })
     }
 
-    const OPEN_DEFINED: bool = true;
     fn open(
         &self,
-        _file_name: &winfsp_wrs::U16CStr,
-        _create_options: winfsp_wrs::CreateOptions,
-        granted_access: FileAccessRights,
-    ) -> Result<(Self::FileContext, FileInfo), windows_sys::Win32::Foundation::NTSTATUS> {
-        if self.read_only && granted_access.0 & 0x2 != 0 {
-            return Err(windows_sys::Win32::Foundation::STATUS_ACCESS_DENIED);
-        }
-        let mut fi = FileInfo::default();
-        fi.set_file_attributes(FileAttributes(0x80));
-        fi.set_file_size(self.disk.size);
-        fi.set_allocation_size((self.disk.size + 511) / 512 * 512);
-        let now = winfsp_wrs::filetime_now();
-        fi.set_creation_time(now);
-        fi.set_last_access_time(now);
-        fi.set_last_write_time(now);
-        fi.set_change_time(now);
-        Ok((self.disk.clone(), fi))
+        _file_name: &winfsp::U16CStr,
+        _create_options: u32,
+        _granted_access: u32,
+        _file_info: &mut OpenFileInfo,
+    ) -> FspResult<()> {
+        Ok(())
     }
 
-    const GET_FILE_INFO_DEFINED: bool = true;
-    fn get_file_info(
-        &self,
-        _ctx: Self::FileContext,
-    ) -> Result<FileInfo, windows_sys::Win32::Foundation::NTSTATUS> {
-        let mut fi = FileInfo::default();
-        fi.set_file_attributes(FileAttributes(0x80));
-        fi.set_file_size(self.disk.size);
-        fi.set_allocation_size((self.disk.size + 511) / 512 * 512);
-        let now = winfsp_wrs::filetime_now();
-        fi.set_creation_time(now);
-        fi.set_last_access_time(now);
-        fi.set_last_write_time(now);
-        fi.set_change_time(now);
-        Ok(fi)
+    fn close(&self, _context: ()) {}
+
+    fn get_file_info(&self, _context: &(), file_info: &mut FileInfo) -> FspResult<()> {
+        file_info.file_size = self.disk.size;
+        file_info.file_attributes = 0x80;
+        file_info.allocation_size = (self.disk.size + 511) / 512 * 512;
+        Ok(())
     }
 
-    const READ_DEFINED: bool = true;
-    fn read(
-        &self,
-        _ctx: Self::FileContext,
-        buffer: &mut [u8],
-        offset: u64,
-    ) -> Result<usize, windows_sys::Win32::Foundation::NTSTATUS> {
-        Ok(self.disk.read_bytes(offset, buffer) as usize)
+    fn read(&self, _context: &(), buffer: &mut [u8], offset: u64) -> FspResult<u32> {
+        Ok(self.disk.read_bytes(offset, buffer))
     }
 
-    const WRITE_DEFINED: bool = true;
     fn write(
         &self,
-        _ctx: Self::FileContext,
+        _context: &(),
         buffer: &[u8],
-        write_mode: WriteMode,
-    ) -> Result<(usize, FileInfo), windows_sys::Win32::Foundation::NTSTATUS> {
-        let offset = match write_mode {
-            WriteMode::Normal { offset } => offset,
-            WriteMode::ConstrainedIO { offset } => offset,
-            WriteMode::WriteToEOF => self.disk.size,
-        };
-        let n = self.disk.write_bytes(offset, buffer) as usize;
-        let mut fi = FileInfo::default();
-        fi.set_file_size(self.disk.size);
-        Ok((n, fi))
+        offset: u64,
+        _write_to_eof: bool,
+        _constrained_io: bool,
+        _file_info: &mut FileInfo,
+    ) -> FspResult<u32> {
+        Ok(self.disk.write_bytes(offset, buffer))
     }
 
-    const CLEANUP_DEFINED: bool = true;
-    fn cleanup(
-        &self,
-        _ctx: Self::FileContext,
-        _file_name: Option<&winfsp_wrs::U16CStr>,
-        _flags: winfsp_wrs::CleanupFlags,
-    ) {}
-
-    const CLOSE_DEFINED: bool = true;
-    fn close(&self, _ctx: Self::FileContext) {}
-
-    const GET_VOLUME_INFO_DEFINED: bool = true;
-    fn get_volume_info(
-        &self,
-    ) -> Result<VolumeInfo, windows_sys::Win32::Foundation::NTSTATUS> {
-        let mut vi = VolumeInfo::default();
-        vi.set_total_size(self.disk.size);
-        vi.set_free_size(0);
-        let _ = vi.set_volume_label(&winfsp_wrs::U16String::from_str("Oxhide").as_ustr());
-        Ok(vi)
-    }
-
-    const FLUSH_DEFINED: bool = true;
-    fn flush(
-        &self,
-        _ctx: Self::FileContext,
-    ) -> Result<FileInfo, windows_sys::Win32::Foundation::NTSTATUS> {
+    fn flush(&self, _context: Option<&()>, _file_info: &mut FileInfo) -> FspResult<()> {
         self.disk.flush();
-        let mut fi = FileInfo::default();
-        fi.set_file_size(self.disk.size);
-        Ok(fi)
+        Ok(())
     }
+
+    fn get_volume_info(&self, out_volume_info: &mut VolumeInfo) -> FspResult<()> {
+        out_volume_info.total_size = self.disk.size;
+        out_volume_info.free_size = 0;
+        Ok(())
+    }
+
+    fn cleanup(&self, _context: &(), _file_name: Option<&winfsp::U16CStr>, _flags: u32) {}
 }
 
 /// Mount an encrypted volume as a virtual disk. Blocks until unmounted.
@@ -137,7 +87,7 @@ pub fn mount_volume(
     mount_point: &str,
     read_only: bool,
 ) -> Result<(), String> {
-    winfsp_wrs::init().map_err(|e| format!("WinFSP init: {}", e))?;
+    let _init = winfsp::winfsp_init_or_die();
 
     let vol = if read_only {
         OpenVolume::open_read_only(volume_path, password, keyfiles, kdf, pim)
@@ -149,31 +99,42 @@ pub fn mount_volume(
 
     let disk = Arc::new(EncryptedDisk::new(vol));
 
-    let mut vp = VolumeParams::default();
-    vp.set_sector_size(512);
-    vp.set_sectors_per_allocation_unit(8);
-    vp.set_max_component_length(255);
-    vp.set_file_info_timeout(1000);
-    let name = winfsp_wrs::U16CString::from_str("Oxhide Volume").unwrap();
-    let _ = vp.set_file_system_name(&name);
-    let prefix = winfsp_wrs::U16CString::from_str("Oxhide").unwrap();
-    let _ = vp.set_prefix(&prefix);
+    let mp_owned: std::ffi::OsString = mount_point.into();
 
-    let params = Params {
-        volume_params: vp,
-        guard_strategy: OperationGuardStrategy::Fine,
-    };
+    let mut vp = VolumeParams::new();
+    // Fully initialize FSP_FSCTL_VOLUME_PARAMS via transmute
+    unsafe {
+        let raw: &mut winfsp_sys::FSP_FSCTL_VOLUME_PARAMS = std::mem::transmute(&mut vp);
+        let sz = std::mem::size_of::<winfsp_sys::FSP_FSCTL_VOLUME_PARAMS>();
+        raw.Version = sz as u16;
+        raw.SectorSize = 512;
+        raw.SectorsPerAllocationUnit = 1;
+        raw.MaxComponentLength = 255;
+        raw.VolumeCreationTime = 0;
+        raw.FileInfoTimeout = 1000;
+        // Disk device mode (empty prefix -> WinFsp.Disk)
+        // The drive appears in Disk Management (diskmgmt.msc) as a virtual disk.
+        // Initialize + format to assign a drive letter.
+        raw.Prefix = [0u16; 192];
+        // Set filesystem name
+        let name = b"Oxhide\0\0";
+        for (i, &b) in name.iter().enumerate() {
+            raw.FileSystemName[i] = b as u16;
+        }
+    }
+    if read_only {
+        vp.read_only_volume(true);
+    }
 
-    let fs_ctx = DiskFs {
-        disk: disk.clone(),
-        read_only,
-    };
-
-    let _fs = FileSystem::start(params, None, fs_ctx)
-        .map_err(|e| format!("WinFSP mount failed: NTSTATUS {:#x}", e))?;
+    let ctx = DiskFs { disk: disk.clone() };
+    let mut host = FileSystemHost::new(vp, ctx)
+        .map_err(|e| format!("WinFSP host error: {e}"))?;
+    host.mount(&mp_owned)
+        .map_err(|e| format!("WinFSP mount error: {e}"))?;
 
     println!("Volume mounted. Press Ctrl+C to unmount.");
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(60));
-    }
+    <FileSystemHost<DiskFs>>::start(&mut host)
+        .map_err(|e| format!("WinFSP start error: {e}"))?;
+
+    Ok(())
 }
