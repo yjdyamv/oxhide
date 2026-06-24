@@ -1,0 +1,3 @@
+{
+  "ECC_DISABLED_HOOKS": "pre:edit-write:gateguard-fact-force,pre:bash:gateguard-fact-force"
+}

@@ -1,0 +1,59 @@
+[workspace]
+members = [
+    "vcrypt-core",
+    "vcrypt-format",
+    "vcrypt-volume",
+    "vcrypt-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["VeraCrypt Rust Contributors"]
+
+[workspace.dependencies]
+# Cryptography
+aes = "0.9.1"
+sha2 = "0.11.0"
+blake2 = "0.10.6"
+argon2 = "0.5.3"
+pbkdf2 = { version = "0.13.0", features = ["hmac"] }
+hmac = "0.13.0"
+rand = "0.10.1"
+getrandom = "0.4.3"
+zeroize = { version = "1.9.0", features = ["derive"] }
+
+# Additional hash functions
+whirlpool = "0.11.0"
+streebog = "0.11.0"
+
+# Cipher implementations
+serpent = "0.6.0"
+twofish = "0.8.0"
+camellia = "0.2.1"
+kuznyechik = "0.9.0"
+
+# Format
+crc = "3"
+subtle = "2"
+
+# Utilities
+thiserror = "2.0.18"
+anyhow = "1.0.102"
+clap = { version = "4.6.1", features = ["derive"] }
+log = "0.4.33"
+env_logger = "0.11.10"
+rpassword = "7.5.4"
+
+# Testing
+criterion = "0.8.2"
+hex = "0.4.3"
+tempfile = "3.27.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

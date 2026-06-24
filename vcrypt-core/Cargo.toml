@@ -1,0 +1,36 @@
+[package]
+name = "vcrypt-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Cryptography
+aes = { workspace = true }
+sha2 = { workspace = true }
+blake2 = { workspace = true }
+whirlpool = { workspace = true }
+streebog = { workspace = true }
+argon2 = { workspace = true }
+pbkdf2 = { workspace = true }
+hmac = { workspace = true }
+getrandom = { workspace = true }
+serpent = { workspace = true }
+twofish = { workspace = true }
+camellia = { workspace = true }
+kuznyechik = { workspace = true }
+
+# Security
+zeroize = { workspace = true }
+
+# Utilities
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+criterion = { workspace = true }
+
+[lib]
+name = "vcrypt_core"
+path = "src/lib.rs"

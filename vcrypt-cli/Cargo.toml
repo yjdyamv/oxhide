@@ -1,0 +1,18 @@
+[package]
+name = "vcrypt-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+vcrypt-core = { path = "../vcrypt-core" }
+vcrypt-format = { path = "../vcrypt-format" }
+vcrypt-volume = { path = "../vcrypt-volume" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+zeroize = { workspace = true }
+hex = { workspace = true }
+rpassword = { workspace = true }
