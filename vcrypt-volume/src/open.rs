@@ -8,7 +8,7 @@ use vcrypt_core::kdf::{
     Argon2idKdf, KdfAlgorithm, KeyDerivation, Pbkdf2Blake2s, Pbkdf2Sha256, Pbkdf2Sha512,
     Pbkdf2Streebog, Pbkdf2Whirlpool,
 };
-use vcrypt_format::header::{PKCS5_SALT_SIZE, VOLUME_HEADER_EFFECTIVE_SIZE};
+use vcrypt_format::header::{PKCS5_SALT_SIZE, VOLUME_HEADER_EFFECTIVE_SIZE, VolumeHeader};
 
 const MAX_HEADER_KEY_SIZE: usize = 192;
 
@@ -22,9 +22,12 @@ pub struct OpenResult {
     pub master_key: Vec<u8>,
     pub data_offset: u64,
     pub data_length: u64,
+    pub salt: [u8; PKCS5_SALT_SIZE],
+    pub header: VolumeHeader,
+    pub used_backup_header: bool,
 }
 
-struct KdfCandidate {
+pub(crate) struct KdfCandidate {
     algorithm: KdfAlgorithm,
     implementation: Box<dyn KeyDerivation>,
     pim: i32,
@@ -61,8 +64,9 @@ pub fn open_volume_file_with_kdf(
                 continue;
             }
 
+            let is_backup = layout.backup_offset == Some(offset);
             let header = &data[offset as usize..offset as usize + read_size];
-            let result = open_volume_single_kdf(header, &pw, kdf, pim);
+            let result = open_volume_single_kdf(header, &pw, kdf, pim, is_backup);
             match result {
                 Ok(r) => return Ok(r),
                 Err(VolumeError::AuthFailed(_)) => continue,
@@ -102,8 +106,9 @@ pub fn open_volume_file(
                 continue;
             }
 
+            let is_backup = layout.backup_offset == Some(offset);
             let header = &data[offset as usize..offset as usize + read_size];
-            match open_volume_auto(header, &pw, pim) {
+            match open_volume_auto(header, &pw, pim, is_backup) {
                 Ok(r) => return Ok(r),
                 Err(VolumeError::AuthFailed(_)) => continue,
                 Err(e) => return Err(e),
@@ -120,7 +125,7 @@ pub fn open_volume_file(
 
 /// Derive MAX_HEADER_KEY_SIZE (192 bytes) once per KDF candidate, then try
 /// every supported cipher by slicing the derived key to `cipher.key_size() * 2`.
-fn try_open(header: &[u8], password: &[u8], candidates: &[KdfCandidate]) -> VolResult<OpenResult> {
+pub(crate) fn try_open(header: &[u8], password: &[u8], candidates: &[KdfCandidate], is_backup: bool) -> VolResult<OpenResult> {
     if header.len() < VOLUME_HEADER_EFFECTIVE_SIZE {
         return Err(VolumeError::InvalidFormat("Header too small".into()));
     }
@@ -149,7 +154,7 @@ fn try_open(header: &[u8], password: &[u8], candidates: &[KdfCandidate]) -> VolR
 
         for &cipher in supported_volume_algorithms() {
             let needed = cipher.key_size() * 2;
-            if let Ok(result) = try_decrypt(header, cipher, &key[..needed], kdf) {
+            if let Ok(result) = try_decrypt(header, cipher, &key[..needed], kdf, is_backup) {
                 log::debug!(
                     "  cipher={} OK (total {:?}, {} attempts)",
                     cipher.name(), total_start.elapsed(), attempt,
@@ -171,16 +176,16 @@ fn try_open(header: &[u8], password: &[u8], candidates: &[KdfCandidate]) -> VolR
 // Public openers (each one just builds a candidate list and calls try_open)
 // ---------------------------------------------------------------------------
 
-fn open_volume_auto(header: &[u8], password: &[u8], pim: Option<i32>) -> VolResult<OpenResult> {
-    try_open(header, password, &auto_kdf_candidates(pim))
+fn open_volume_auto(header: &[u8], password: &[u8], pim: Option<i32>, is_backup: bool) -> VolResult<OpenResult> {
+    try_open(header, password, &auto_kdf_candidates(pim), is_backup)
 }
 
-fn open_volume_single_kdf(header: &[u8], password: &[u8], kdf: KdfAlgorithm, pim: i32) -> VolResult<OpenResult> {
-    try_open(header, password, &[make_kdf_candidate(kdf, pim)])
+fn open_volume_single_kdf(header: &[u8], password: &[u8], kdf: KdfAlgorithm, pim: i32, is_backup: bool) -> VolResult<OpenResult> {
+    try_open(header, password, &[make_kdf_candidate(kdf, pim)], is_backup)
 }
 
 pub fn open_volume_with_pim(header: &[u8], password: &[u8], pim: i32) -> VolResult<OpenResult> {
-    open_volume_auto(header, password, Some(pim))
+    open_volume_auto(header, password, Some(pim), false)
 }
 
 pub fn open_volume_with_iters(header: &[u8], password: &[u8], iterations: u32) -> VolResult<OpenResult> {
@@ -192,7 +197,7 @@ pub fn open_volume_with_iters(header: &[u8], password: &[u8], iterations: u32) -
         iterations,
         memory_cost_kib: None,
     };
-    try_open(header, password, &[candidate])
+    try_open(header, password, &[candidate], false)
 }
 
 fn try_decrypt(
@@ -200,6 +205,7 @@ fn try_decrypt(
     header_cipher: CipherType,
     header_key: &[u8],
     kdf: &KdfCandidate,
+    is_backup: bool,
 ) -> VolResult<OpenResult> {
     let mut decrypted = data[..VOLUME_HEADER_EFFECTIVE_SIZE].to_vec();
     vcrypt_format::encrypt::decrypt_header_area(&mut decrypted, header_key, header_cipher)
@@ -207,6 +213,10 @@ fn try_decrypt(
 
     let header = vcrypt_format::deser::deserialize_header(&decrypted)
         .map_err(|_| VolumeError::AuthFailed("header parse".into()))?;
+
+    let salt: [u8; PKCS5_SALT_SIZE] = data[..PKCS5_SALT_SIZE]
+        .try_into()
+        .map_err(|_| VolumeError::InvalidFormat("Bad salt".into()))?;
 
     let data_cipher = infer_data_cipher(header_cipher, &header.master_keydata)?;
     let expected_key_bytes = data_cipher.key_size() * 2;
@@ -233,6 +243,9 @@ fn try_decrypt(
         } else {
             header.volume_size
         },
+        salt,
+        header,
+        used_backup_header: is_backup,
     })
 }
 
@@ -247,7 +260,7 @@ fn candidate_offsets(layout: &HeaderLayout, file_size: u64) -> Vec<u64> {
 }
 
 /// KDFs tried during auto-detection, ordered from fastest to slowest.
-fn auto_kdf_candidates(pim: Option<i32>) -> Vec<KdfCandidate> {
+pub(crate) fn auto_kdf_candidates(pim: Option<i32>) -> Vec<KdfCandidate> {
     let kdfs = [
         KdfAlgorithm::Pbkdf2Sha512,
         KdfAlgorithm::Pbkdf2Sha256,
@@ -266,7 +279,7 @@ fn pim_for_algorithm(_alg: KdfAlgorithm, pim: Option<i32>) -> i32 {
     pim.unwrap_or(0)
 }
 
-fn make_kdf_candidate(kdf: KdfAlgorithm, pim: i32) -> KdfCandidate {
+pub(crate) fn make_kdf_candidate(kdf: KdfAlgorithm, pim: i32) -> KdfCandidate {
     let (implementation, iterations, memory_cost_kib) = match kdf {
         KdfAlgorithm::Argon2id => {
             let (memory_cost_kib, time_cost) = Argon2idKdf::params_for_pim(pim);
@@ -396,7 +409,7 @@ mod tests {
         vol[..512].copy_from_slice(&hdr_bytes);
         vcrypt_format::encrypt::encrypt_header_area(&mut vol[..512], &key, CipherType::Aes).unwrap();
 
-        let opened = open_volume_single_kdf(&vol, b"argon2", KdfAlgorithm::Argon2id, 1).unwrap();
+        let opened = open_volume_single_kdf(&vol, b"argon2", KdfAlgorithm::Argon2id, 1, false).unwrap();
         assert_eq!(opened.kdf, KdfAlgorithm::Argon2id);
         assert_eq!(opened.pim, 1);
         assert_eq!(opened.memory_cost_kib, Some(65536));

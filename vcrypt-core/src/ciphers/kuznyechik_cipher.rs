@@ -30,10 +30,8 @@ impl BlockCipher for KuznyechikCipher {
         if block.len() != Self::BLOCK_SIZE {
             return Err(CryptoError::InvalidBlockSize { expected: Self::BLOCK_SIZE, actual: block.len() });
         }
-        let mut b = kuznyechik::cipher::Block::<Kuznyechik>::default();
-        b.copy_from_slice(block);
-        self.cipher.encrypt_block(&mut b);
-        block.copy_from_slice(&b);
+        let b = unsafe { &mut *(block.as_mut_ptr() as *mut kuznyechik::cipher::Block::<Kuznyechik>) };
+        self.cipher.encrypt_block(b);
         Ok(())
     }
 
@@ -41,10 +39,26 @@ impl BlockCipher for KuznyechikCipher {
         if block.len() != Self::BLOCK_SIZE {
             return Err(CryptoError::InvalidBlockSize { expected: Self::BLOCK_SIZE, actual: block.len() });
         }
-        let mut b = kuznyechik::cipher::Block::<Kuznyechik>::default();
-        b.copy_from_slice(block);
-        self.cipher.decrypt_block(&mut b);
-        block.copy_from_slice(&b);
+        let b = unsafe { &mut *(block.as_mut_ptr() as *mut kuznyechik::cipher::Block::<Kuznyechik>) };
+        self.cipher.decrypt_block(b);
+        Ok(())
+    }
+
+    fn encrypt_blocks(&self, data: &mut [u8]) -> Result<()> {
+        let n = data.len() / Self::BLOCK_SIZE;
+        let blocks = unsafe {
+            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut kuznyechik::cipher::Block::<Kuznyechik>, n)
+        };
+        self.cipher.encrypt_blocks(blocks);
+        Ok(())
+    }
+
+    fn decrypt_blocks(&self, data: &mut [u8]) -> Result<()> {
+        let n = data.len() / Self::BLOCK_SIZE;
+        let blocks = unsafe {
+            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut kuznyechik::cipher::Block::<Kuznyechik>, n)
+        };
+        self.cipher.decrypt_blocks(blocks);
         Ok(())
     }
 }

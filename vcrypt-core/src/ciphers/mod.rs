@@ -38,6 +38,25 @@ pub trait BlockCipher: Send + Sync {
 
     /// Decrypt a single block in place
     fn decrypt_block(&self, block: &mut [u8]) -> Result<()>;
+
+    /// Encrypt multiple blocks in place.
+    /// `data` length must be a multiple of `BLOCK_SIZE`.
+    /// Default implementation calls `encrypt_block` in a loop.
+    fn encrypt_blocks(&self, data: &mut [u8]) -> Result<()> {
+        for chunk in data.chunks_mut(Self::BLOCK_SIZE) {
+            self.encrypt_block(chunk)?;
+        }
+        Ok(())
+    }
+
+    /// Decrypt multiple blocks in place.
+    /// Default implementation calls `decrypt_block` in a loop.
+    fn decrypt_blocks(&self, data: &mut [u8]) -> Result<()> {
+        for chunk in data.chunks_mut(Self::BLOCK_SIZE) {
+            self.decrypt_block(chunk)?;
+        }
+        Ok(())
+    }
 }
 
 mod aes_cipher;

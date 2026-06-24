@@ -1,7 +1,8 @@
-//! XTS (XEX-based tweaked-codebook mode with ciphertext stealing) implementation
+//! XTS (XEX-based tweaked-codebook mode) implementation
 //!
 //! XTS is the block cipher mode used by VeraCrypt for disk encryption.
-//! It provides strong security for block-level encryption.
+//! Data length must be a multiple of the cipher block size (16 bytes) —
+//! matching VeraCrypt's requirement (see Xts.c EncryptBufferXTS).
 
 use crate::{ciphers::BlockCipher, CryptoError, Result};
 
@@ -35,7 +36,7 @@ impl<C: BlockCipher> XtsMode<C> {
         Ok(Self { cipher1, cipher2 })
     }
 
-    /// Encrypt data using XTS mode (with ciphertext stealing)
+    /// Encrypt data using XTS mode — batch path (like VeraCrypt's EncryptBufferXTSParallel).
     pub fn encrypt(&self, sector_index: u64, data: &mut [u8]) -> Result<()> {
         if data.len() < C::BLOCK_SIZE {
             return Err(CryptoError::InvalidBlockSize {
@@ -43,33 +44,24 @@ impl<C: BlockCipher> XtsMode<C> {
                 actual: data.len(),
             });
         }
-
-        let mut tweak = self.compute_tweak(sector_index)?;
-
-        for chunk in data.chunks_mut(C::BLOCK_SIZE) {
-            if chunk.len() == C::BLOCK_SIZE {
-                // XOR with tweak
-                xor_blocks(chunk, &tweak);
-
-                // Encrypt
-                self.cipher1.encrypt_block(chunk)?;
-
-                // XOR with tweak again
-                xor_blocks(chunk, &tweak);
-
-                // Update tweak (multiply by α in GF(2^128))
-                multiply_tweak(&mut tweak);
-            }
+        if data.len() % C::BLOCK_SIZE != 0 {
+            return Err(CryptoError::InvalidDataLength(format!(
+                "XTS requires data length to be a multiple of {} (got {})",
+                C::BLOCK_SIZE,
+                data.len()
+            )));
         }
+
+        let n_blocks = data.len() / C::BLOCK_SIZE;
+        let tweaks = precompute_tweaks::<C>(self, sector_index, n_blocks)?;
+        batch_xor_blocks(data, &tweaks, n_blocks);
+        self.cipher1.encrypt_blocks(data)?;
+        batch_xor_blocks(data, &tweaks, n_blocks);
 
         Ok(())
     }
 
-    /// Decrypt data using XTS mode
-    ///
-    /// # Arguments
-    /// * `sector_index` - Sector/block index for the tweak
-    /// * `data` - Data to decrypt (must be at least one block)
+    /// Decrypt data using XTS mode — batch path.
     pub fn decrypt(&self, sector_index: u64, data: &mut [u8]) -> Result<()> {
         if data.len() < C::BLOCK_SIZE {
             return Err(CryptoError::InvalidBlockSize {
@@ -77,57 +69,67 @@ impl<C: BlockCipher> XtsMode<C> {
                 actual: data.len(),
             });
         }
-
-        let mut tweak = self.compute_tweak(sector_index)?;
-
-        for chunk in data.chunks_mut(C::BLOCK_SIZE) {
-            if chunk.len() == C::BLOCK_SIZE {
-                // XOR with tweak
-                xor_blocks(chunk, &tweak);
-
-                // Decrypt
-                self.cipher1.decrypt_block(chunk)?;
-
-                // XOR with tweak again
-                xor_blocks(chunk, &tweak);
-
-                // Update tweak
-                multiply_tweak(&mut tweak);
-            }
+        if data.len() % C::BLOCK_SIZE != 0 {
+            return Err(CryptoError::InvalidDataLength(format!(
+                "XTS requires data length to be a multiple of {} (got {})",
+                C::BLOCK_SIZE,
+                data.len()
+            )));
         }
+
+        let n_blocks = data.len() / C::BLOCK_SIZE;
+        let tweaks = precompute_tweaks::<C>(self, sector_index, n_blocks)?;
+        batch_xor_blocks(data, &tweaks, n_blocks);
+        self.cipher1.decrypt_blocks(data)?;
+        batch_xor_blocks(data, &tweaks, n_blocks);
 
         Ok(())
     }
 
     /// Compute the initial tweak value for a sector
-    fn compute_tweak(&self, sector_index: u64) -> Result<Vec<u8>> {
-        let mut tweak = vec![0u8; C::BLOCK_SIZE];
+    fn compute_tweak(&self, sector_index: u64) -> Result<[u8; 16]> {
+        let mut tweak = [0u8; 16];
         tweak[..8].copy_from_slice(&sector_index.to_le_bytes());
         self.cipher2.encrypt_block(&mut tweak)?;
         Ok(tweak)
     }
 }
 
-/// XOR two blocks
-fn xor_blocks(dst: &mut [u8], src: &[u8]) {
-    for (d, s) in dst.iter_mut().zip(src.iter()) {
-        *d ^= s;
+/// Precompute all tweaks for `n_blocks` blocks starting at `sector_index`.
+fn precompute_tweaks<C: BlockCipher>(xts: &XtsMode<C>, sector_index: u64, n_blocks: usize) -> Result<Vec<u8>> {
+    let mut tweaks = vec![0u8; n_blocks * 16];
+    let mut t = xts.compute_tweak(sector_index)?;
+    for i in 0..n_blocks {
+        tweaks[i * 16..(i + 1) * 16].copy_from_slice(&t);
+        multiply_tweak(&mut t);
+    }
+    Ok(tweaks)
+}
+
+/// Batch XOR: `data[i] ^= tweaks[i]` for `n_blocks` 16-byte blocks (u128 per block).
+fn batch_xor_blocks(data: &mut [u8], tweaks: &[u8], n_blocks: usize) {
+    for i in 0..n_blocks {
+        let off = i * 16;
+        unsafe {
+            let d = data.as_mut_ptr().add(off) as *mut u128;
+            let t = tweaks.as_ptr().add(off) as *const u128;
+            *d ^= *t;
+        }
     }
 }
 
-/// Multiply tweak by α in GF(2^128)
+/// Multiply tweak by α in GF(2^128) — little-endian byte order
 fn multiply_tweak(tweak: &mut [u8]) {
-    let mut carry = 0u8;
-
-    for byte in tweak.iter_mut() {
-        let new_carry = (*byte >> 7) & 1;
-        *byte = (*byte << 1) | carry;
-        carry = new_carry;
-    }
-
-    // If there was a carry, XOR with the reduction polynomial
-    if carry != 0 {
-        tweak[0] ^= 0x87;
+    debug_assert_eq!(tweak.len(), 16);
+    unsafe {
+        let t = &mut *(tweak.as_mut_ptr() as *mut [u64; 2]);
+        let low = t[0];
+        let high = t[1];
+        t[0] = low << 1;
+        t[1] = (high << 1) | (low >> 63);
+        if (high >> 63) & 1 != 0 {
+            tweak[0] ^= 0x87;
+        }
     }
 }
 

@@ -3,6 +3,8 @@ use vcrypt_core::ciphers::CipherType;
 use vcrypt_core::kdf::KdfAlgorithm;
 use vcrypt_volume::OpenVolume;
 
+mod bench;
+
 #[derive(Parser)]
 #[command(name = "vcrypt", version = "0.1.0", about = "VeraCrypt-compatible Rust CLI")]
 struct Cli {
@@ -59,6 +61,36 @@ enum Commands {
         count: u64,
     },
     Test,
+    Benchmark {
+        #[arg(default_value = "all")]
+        kind: String,
+    },
+    Change {
+        volume: String,
+        #[arg(short, long)]
+        password: Option<String>,
+        #[arg(short, long)]
+        new_password: Option<String>,
+        #[arg(short = 'k', long)]
+        kdf: Option<String>,
+        #[arg(short = 'm', long)]
+        pim: Option<i32>,
+        #[arg(short = 'f', long)]
+        keyfile: Vec<String>,
+        #[arg(long)]
+        new_keyfile: Vec<String>,
+    },
+    Restore {
+        volume: String,
+        #[arg(short, long)]
+        password: Option<String>,
+        #[arg(short = 'k', long)]
+        kdf: Option<String>,
+        #[arg(short = 'm', long)]
+        pim: Option<i32>,
+        #[arg(short = 'f', long)]
+        keyfile: Vec<String>,
+    },
 }
 
 fn main() {
@@ -80,6 +112,15 @@ fn main() {
         }
         Commands::Test => {
             cmd_test();
+        }
+        Commands::Benchmark { kind } => {
+            bench::run_benchmark(&kind);
+        }
+        Commands::Change { volume, password, new_password, kdf, pim, keyfile, new_keyfile } => {
+            cmd_change(&volume, password, new_password, kdf.as_deref(), pim, &keyfile, &new_keyfile);
+        }
+        Commands::Restore { volume, password, kdf, pim, keyfile } => {
+            cmd_restore(&volume, password, kdf.as_deref(), pim, &keyfile);
         }
     }
 }
@@ -187,9 +228,14 @@ fn cmd_create(
         }
     };
 
+    let progress: vcrypt_volume::create::ProgressFn = Box::new(|msg: &str| {
+        println!("    {}", msg);
+    });
+
     match vcrypt_volume::create_volume_full(
         &mut file, volume_size, &pw_bytes,
         cipher, kdf_impl.as_ref(), kdf, kdf_iterations, None,
+        Some(&progress),
     ) {
         Ok(()) => println!("    Status:   Volume created successfully"),
         Err(e) => println!("    Error:   {}", e),
@@ -200,9 +246,9 @@ fn parse_size(s: &str) -> u64 {
     let s = s.to_uppercase();
     let num: String = s.chars().take_while(|c| c.is_digit(10)).collect();
     let n: u64 = num.parse().unwrap_or(100);
-    if s.ends_with("G") || s.ends_with("GB") { n * 1024 * 1024 * 1024 }
-    else if s.ends_with("M") || s.ends_with("MB") { n * 1024 * 1024 }
-    else if s.ends_with("K") || s.ends_with("KB") { n * 1024 }
+    if s.ends_with("G") || s.ends_with("GB") { n.saturating_mul(1024 * 1024 * 1024) }
+    else if s.ends_with("M") || s.ends_with("MB") { n.saturating_mul(1024 * 1024) }
+    else if s.ends_with("K") || s.ends_with("KB") { n.saturating_mul(1024) }
     else { n }
 }
 
@@ -264,6 +310,9 @@ fn print_probe_result(result: vcrypt_volume::VolResult<vcrypt_volume::open::Open
             println!("    Iter:      {}", r.iterations);
             if let Some(memory) = r.memory_cost_kib {
                 println!("    Argon2Mem: {} KiB", memory);
+            }
+            if r.used_backup_header {
+                println!("    Header:    backup");
             }
             println!("    Data off:  {}", r.data_offset);
             println!("    Data len:  {}", r.data_length);
@@ -344,6 +393,80 @@ fn hexdump(data: &[u8], offset: u64) {
             print!(" ");
         }
         println!("|");
+    }
+}
+
+fn cmd_change(
+    volume: &str, password: Option<String>, new_password: Option<String>,
+    kdf: Option<&str>, pim: Option<i32>,
+    keyfile: &[String], new_keyfile: &[String],
+) {
+    println!("==> Changing password: {}", volume);
+
+    let pw = password.unwrap_or_else(|| read_password("Old password: "));
+    let new_pw = new_password.unwrap_or_else(|| read_password("New password: "));
+    if new_pw.is_empty() {
+        println!("    Error: empty password not allowed");
+        return;
+    }
+
+    let new_kdf = kdf.map(|s| parse_kdf(s).unwrap_or_else(|| {
+        eprintln!("Error: unknown KDF '{}'", s);
+        std::process::exit(1);
+    }));
+
+    let kf = keyfile_refs(keyfile);
+    let new_kf = keyfile_refs(new_keyfile);
+
+    // Auto-detect old KDF (like probe), then re-encrypt with new credentials
+    let open_result = match vcrypt_volume::open_volume_file(
+        volume, pw.as_bytes(), &kf, pim,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("    Error opening: {}", e);
+            return;
+        }
+    };
+
+    // New KDF defaults to same as old
+    let actual_new_kdf = new_kdf.unwrap_or(open_result.kdf);
+    let actual_new_pim = pim.unwrap_or(0);
+
+    // Re-encrypt headers
+    let mut file = match std::fs::OpenOptions::new().read(true).write(true).open(volume) {
+        Ok(f) => f,
+        Err(e) => { println!("    Error: {}", e); return; }
+    };
+
+    match vcrypt_volume::change_volume_password(
+        &mut file, &open_result,
+        new_pw.as_bytes(), &new_kf,
+        actual_new_kdf, actual_new_pim,
+    ) {
+        Ok(()) => println!("    Status:    password changed successfully"),
+        Err(e) => println!("    Error:     {}", e),
+    }
+}
+
+fn cmd_restore(
+    volume: &str, password: Option<String>, kdf: Option<&str>, pim: Option<i32>,
+    keyfile: &[String],
+) {
+    println!("==> Restoring header: {}", volume);
+
+    let pw = password.unwrap_or_else(|| read_password("Password: "));
+    let kf = keyfile_refs(keyfile);
+
+    let mut file = match std::fs::OpenOptions::new().read(true).write(true).open(volume) {
+        Ok(f) => f,
+        Err(e) => { println!("    Error: {}", e); return; }
+    };
+
+    let kdf_alg = kdf.and_then(parse_kdf);
+    match vcrypt_volume::restore_volume_header(&mut file, pw.as_bytes(), &kf, kdf_alg, pim) {
+        Ok(()) => println!("    Status:    header restored from backup"),
+        Err(e) => println!("    Error:     {}", e),
     }
 }
 

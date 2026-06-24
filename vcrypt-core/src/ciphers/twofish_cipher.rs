@@ -1,12 +1,10 @@
-//! Twofish cipher implementation
+//! Twofish cipher implementation — powered by the `lsx` crate with precomputed MDS tables.
 
 use super::BlockCipher;
 use crate::{CryptoError, Result};
-use twofish::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
-use twofish::Twofish;
 
 /// Twofish cipher
-pub struct TwofishCipher { cipher: Twofish }
+pub struct TwofishCipher { cipher: lsx::twofish::Twofish }
 
 impl TwofishCipher {
     /// Create new Twofish cipher with 32-byte key
@@ -14,9 +12,11 @@ impl TwofishCipher {
         if key.len() != Self::KEY_SIZE {
             return Err(CryptoError::InvalidKeySize { expected: Self::KEY_SIZE, actual: key.len() });
         }
-        let cipher = Twofish::new_from_slice(key)
-            .map_err(|e| CryptoError::CipherInitFailed(format!("Twofish: {}", e)))?;
-        Ok(Self { cipher })
+        // lsx provides key-size-specialised constructors
+        let tf = lsx::twofish::Twofish::new256(
+            key.try_into().map_err(|_| CryptoError::CipherInitFailed("Twofish: key length".into()))?
+        );
+        Ok(Self { cipher: tf })
     }
 }
 
@@ -30,10 +30,8 @@ impl BlockCipher for TwofishCipher {
         if block.len() != Self::BLOCK_SIZE {
             return Err(CryptoError::InvalidBlockSize { expected: Self::BLOCK_SIZE, actual: block.len() });
         }
-        let mut b = twofish::cipher::Block::<Twofish>::default();
-        b.copy_from_slice(block);
-        self.cipher.encrypt_block(&mut b);
-        block.copy_from_slice(&b);
+        let input: [u8; 16] = block.try_into().unwrap();
+        self.cipher.encrypt(&input, (&mut block[..16]).try_into().unwrap());
         Ok(())
     }
 
@@ -41,10 +39,8 @@ impl BlockCipher for TwofishCipher {
         if block.len() != Self::BLOCK_SIZE {
             return Err(CryptoError::InvalidBlockSize { expected: Self::BLOCK_SIZE, actual: block.len() });
         }
-        let mut b = twofish::cipher::Block::<Twofish>::default();
-        b.copy_from_slice(block);
-        self.cipher.decrypt_block(&mut b);
-        block.copy_from_slice(&b);
+        let input: [u8; 16] = block.try_into().unwrap();
+        self.cipher.decrypt(&input, (&mut block[..16]).try_into().unwrap());
         Ok(())
     }
 }

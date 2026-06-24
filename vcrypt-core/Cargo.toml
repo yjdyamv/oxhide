@@ -17,7 +17,7 @@ pbkdf2 = { workspace = true }
 hmac = { workspace = true }
 getrandom = { workspace = true }
 serpent = { workspace = true }
-twofish = { workspace = true }
+lsx = { workspace = true }
 camellia = { workspace = true }
 kuznyechik = { workspace = true }
 

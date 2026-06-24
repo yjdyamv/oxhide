@@ -128,6 +128,10 @@ impl OpenVolume {
         drop(self.file);
         Ok(())
     }
+
+    pub fn used_backup_header(&self) -> bool {
+        self.inner.used_backup_header
+    }
 }
 
 impl Read for OpenVolume {
@@ -301,5 +305,47 @@ mod tests {
         let cfg = VolumeConfig::new()
             .with_cipher(vcrypt_core::ciphers::CipherType::Twofish);
         assert_eq!(cfg.cipher, vcrypt_core::ciphers::CipherType::Twofish);
+    }
+
+    #[test]
+    fn test_backup_header_fallback() {
+        use crate::create::create_volume;
+        use std::io::{Seek, SeekFrom, Write};
+        use vcrypt_core::kdf::{Pbkdf2Sha256, KeyDerivation};
+        use vcrypt_format::header::VOLUME_HEADER_SIZE;
+        use tempfile::NamedTempFile;
+
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let iters = Pbkdf2Sha256.get_iteration_count(0);
+
+        {
+            let mut f = std::fs::File::create(path).unwrap();
+            f.set_len(VOLUME_HEADER_SIZE as u64 * 4 + 512).unwrap();
+            create_volume(
+                &mut f, 512, b"test",
+                &Pbkdf2Sha256, KdfAlgorithm::Pbkdf2Sha256, iters,
+            ).unwrap();
+        }
+
+        // Open normally — should use primary header
+        {
+            let vol = OpenVolume::open(path, b"test", &[], Some(KdfAlgorithm::Pbkdf2Sha256), Some(0)).unwrap();
+            assert!(!vol.used_backup_header(), "should use primary header");
+        }
+
+        // Corrupt primary header (overwrite first 64 bytes = salt)
+        {
+            let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            f.seek(SeekFrom::Start(0)).unwrap();
+            f.write_all(&[0xFFu8; 64]).unwrap();
+        }
+
+        // Open again — should fall back to backup header
+        {
+            let vol = OpenVolume::open(path, b"test", &[], Some(KdfAlgorithm::Pbkdf2Sha256), Some(0)).unwrap();
+            assert!(vol.used_backup_header(), "should fall back to backup header after primary corruption");
+            assert_eq!(vol.data_size(), 512);
+        }
     }
 }

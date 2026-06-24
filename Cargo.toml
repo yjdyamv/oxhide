@@ -31,7 +31,7 @@ streebog = "0.11.0"
 
 # Cipher implementations
 serpent = "0.6.0"
-twofish = "0.8.0"
+lsx = "1.1.2"
 camellia = "0.2.1"
 kuznyechik = "0.9.0"
 

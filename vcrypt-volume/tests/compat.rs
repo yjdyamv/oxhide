@@ -26,6 +26,7 @@ fn compat_open_veracrypt_volume() {
     assert_eq!(result.kdf, KdfAlgorithm::Argon2id);
     assert_eq!(result.master_key.len(), 128);
     assert!(result.data_length > 0);
+    assert!(!result.used_backup_header, "should use primary header, not backup");
 }
 
 #[test]

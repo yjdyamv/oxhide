@@ -40,10 +40,9 @@ impl BlockCipher for AesCipher {
                 actual: block.len(),
             });
         }
-        let mut b = aes::cipher::Block::<Aes256>::default();
-        b.copy_from_slice(block);
-        self.cipher.encrypt_block(&mut b);
-        block.copy_from_slice(&b);
+        // SAFETY: length == 16 verified above; GenericArray<u8,U16> is repr(transparent) over [u8;16]
+        let b = unsafe { &mut *(block.as_mut_ptr() as *mut aes::cipher::Block::<Aes256>) };
+        self.cipher.encrypt_block(b);
         Ok(())
     }
 
@@ -54,10 +53,32 @@ impl BlockCipher for AesCipher {
                 actual: block.len(),
             });
         }
-        let mut b = aes::cipher::Block::<Aes256>::default();
-        b.copy_from_slice(block);
-        self.cipher.decrypt_block(&mut b);
-        block.copy_from_slice(&b);
+        let b = unsafe { &mut *(block.as_mut_ptr() as *mut aes::cipher::Block::<Aes256>) };
+        self.cipher.decrypt_block(b);
+        Ok(())
+    }
+
+    fn encrypt_blocks(&self, data: &mut [u8]) -> Result<()> {
+        let n = data.len() / Self::BLOCK_SIZE;
+        let blocks = unsafe {
+            std::slice::from_raw_parts_mut(
+                data.as_mut_ptr() as *mut aes::cipher::Block::<Aes256>,
+                n,
+            )
+        };
+        self.cipher.encrypt_blocks(blocks);
+        Ok(())
+    }
+
+    fn decrypt_blocks(&self, data: &mut [u8]) -> Result<()> {
+        let n = data.len() / Self::BLOCK_SIZE;
+        let blocks = unsafe {
+            std::slice::from_raw_parts_mut(
+                data.as_mut_ptr() as *mut aes::cipher::Block::<Aes256>,
+                n,
+            )
+        };
+        self.cipher.decrypt_blocks(blocks);
         Ok(())
     }
 }

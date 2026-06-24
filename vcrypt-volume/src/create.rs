@@ -9,6 +9,9 @@ use std::io::{Seek, SeekFrom, Write};
 
 const MAX_HEADER_KEY_SIZE: usize = 192;
 
+/// Progress callback type for volume creation.
+pub type ProgressFn = Box<dyn Fn(&str) + Send>;
+
 /// Create a new encrypted volume file with explicit cipher and KDF.
 pub fn create_volume_full(
     file: &mut (impl Write + Seek),
@@ -19,11 +22,18 @@ pub fn create_volume_full(
     _kdf_type: KdfAlgorithm,
     iterations: u32,
     _memory_cost_kib: Option<u32>,
+    progress: Option<&ProgressFn>,
 ) -> VolResult<()> {
+    if let Some(p) = progress {
+        p("Generating salt...");
+    }
     let salt = rng::random_salt()
         .map_err(|e| VolumeError::CryptoError(format!("salt: {}", e)))?;
 
     let key_bytes = cipher.key_size() * 2;
+    if let Some(p) = progress {
+        p("Generating master key...");
+    }
     let master_key = rng::random_bytes(key_bytes)
         .map_err(|e| VolumeError::CryptoError(format!("key: {}", e)))?;
 
@@ -32,31 +42,38 @@ pub fn create_volume_full(
     header.volume_size = volume_size;
     header.encrypted_area_start = (VOLUME_HEADER_SIZE * 4) as u64;
     header.encrypted_area_length = volume_size;
-    // Clear master_keydata then copy key into first N bytes (rest stays zero)
     header.master_keydata = vec![0u8; MASTER_KEYDATA_SIZE];
     header.master_keydata[..key_bytes].copy_from_slice(&master_key);
 
     let mut hdr_bytes = vcrypt_format::ser::serialize_header_full(&header)
         .map_err(|e| VolumeError::FormatError(format!("ser: {}", e)))?;
 
-    // Derive header key at max size (matching VeraCrypt's GetHeaderKeyDerivationSize).
-    // Argon2id output depends on output length, so this must match what VeraCrypt uses
-    // during open (always 192 bytes). PBKDF2 is prefix-consistent so this works for both.
+    if let Some(p) = progress {
+        p(&format!("Deriving header key ({} iterations)...", iterations));
+    }
     let mut max_key = vec![0u8; MAX_HEADER_KEY_SIZE];
     kdf.derive(password, &salt, iterations, &mut max_key)
         .map_err(|e| VolumeError::CryptoError(format!("KDF: {}", e)))?;
     let header_key = &max_key[..cipher.key_size() * 2];
 
+    if let Some(p) = progress {
+        p("Encrypting header...");
+    }
     vcrypt_format::encrypt::encrypt_header_area(
         &mut hdr_bytes[..vcrypt_format::header::VOLUME_HEADER_EFFECTIVE_SIZE],
         &header_key,
         cipher,
     ).map_err(|e| VolumeError::FormatError(format!("enc: {}", e)))?;
 
+    if let Some(p) = progress {
+        p("Writing primary header...");
+    }
     file.write_all(&hdr_bytes)
         .map_err(|e| VolumeError::WriteError { sector: 0, msg: format!("write: {}", e) })?;
 
-    // Write backup header at end of file
+    if let Some(p) = progress {
+        p("Writing backup header...");
+    }
     let pos = file.seek(SeekFrom::End(0))
         .map_err(|e| VolumeError::WriteError { sector: 0, msg: format!("seek: {}", e) })?;
     let backup_offset = pos.saturating_sub(2 * VOLUME_HEADER_SIZE as u64);
@@ -65,6 +82,9 @@ pub fn create_volume_full(
     file.write_all(&hdr_bytes)
         .map_err(|e| VolumeError::WriteError { sector: 0, msg: format!("write: {}", e) })?;
 
+    if let Some(p) = progress {
+        p("Volume created successfully.");
+    }
     Ok(())
 }
 
@@ -77,7 +97,7 @@ pub fn create_volume(
     kdf_type: KdfAlgorithm,
     iterations: u32,
 ) -> VolResult<()> {
-    create_volume_full(file, volume_size, password, CipherType::Aes, kdf, kdf_type, iterations, None)
+    create_volume_full(file, volume_size, password, CipherType::Aes, kdf, kdf_type, iterations, None, None)
 }
 
 #[cfg(test)]
@@ -117,6 +137,7 @@ mod tests {
             KdfAlgorithm::Argon2id,
             3,
             Some(65536),
+            None,
         )
         .unwrap();
 
