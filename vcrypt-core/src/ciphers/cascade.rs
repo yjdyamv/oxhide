@@ -4,7 +4,7 @@
 //! ciphers in sequence. VeraCrypt supports several cascade combinations for
 //! enhanced security through defense in depth.
 
-use super::{AesCipher, BlockCipher, CipherType, SerpentCipher, TwofishCipher};
+use super::{AesCipher, BlockCipher, CamelliaCipher, CipherType, KuznyechikCipher, SerpentCipher, TwofishCipher};
 use crate::{CryptoError, Result};
 
 /// Cascade mode defines the order of ciphers in a cascade
@@ -20,14 +20,27 @@ pub enum CascadeMode {
     SerpentTwofishAes,
     /// Twofish-Serpent (2 ciphers)
     TwofishSerpent,
+    /// Camellia-Kuznyechik (2 ciphers)
+    CamelliaKuznyechik,
+    /// Camellia-Serpent (2 ciphers)
+    CamelliaSerpent,
+    /// Kuznyechik-AES (2 ciphers)
+    KuznyechikAes,
+    /// Kuznyechik-Serpent-Camellia (3 ciphers)
+    KuznyechikSerpentCamellia,
+    /// Kuznyechik-Twofish (2 ciphers)
+    KuznyechikTwofish,
 }
 
 impl CascadeMode {
     /// Get the number of ciphers in this cascade
     pub fn cipher_count(&self) -> usize {
         match self {
-            Self::AesTwofish | Self::SerpentAes | Self::TwofishSerpent => 2,
-            Self::AesTwofishSerpent | Self::SerpentTwofishAes => 3,
+            Self::AesTwofish | Self::SerpentAes | Self::TwofishSerpent
+            | Self::CamelliaKuznyechik | Self::CamelliaSerpent
+            | Self::KuznyechikAes | Self::KuznyechikTwofish => 2,
+            Self::AesTwofishSerpent | Self::SerpentTwofishAes
+            | Self::KuznyechikSerpentCamellia => 3,
         }
     }
 
@@ -44,6 +57,11 @@ impl CascadeMode {
             Self::SerpentAes => "Serpent-AES",
             Self::SerpentTwofishAes => "Serpent-Twofish-AES",
             Self::TwofishSerpent => "Twofish-Serpent",
+            Self::CamelliaKuznyechik => "Camellia-Kuznyechik",
+            Self::CamelliaSerpent => "Camellia-Serpent",
+            Self::KuznyechikAes => "Kuznyechik-AES",
+            Self::KuznyechikSerpentCamellia => "Kuznyechik-Serpent-Camellia",
+            Self::KuznyechikTwofish => "Kuznyechik-Twofish",
         }
     }
 
@@ -68,6 +86,15 @@ impl CascadeMode {
                 (CipherType::Serpent, 64),
             ],
             Self::TwofishSerpent => vec![(CipherType::Serpent, 0), (CipherType::Twofish, 32)],
+            Self::CamelliaKuznyechik => vec![(CipherType::Kuznyechik, 0), (CipherType::Camellia, 32)],
+            Self::CamelliaSerpent => vec![(CipherType::Serpent, 0), (CipherType::Camellia, 32)],
+            Self::KuznyechikAes => vec![(CipherType::Aes, 0), (CipherType::Kuznyechik, 32)],
+            Self::KuznyechikSerpentCamellia => vec![
+                (CipherType::Camellia, 0),
+                (CipherType::Serpent, 32),
+                (CipherType::Kuznyechik, 64),
+            ],
+            Self::KuznyechikTwofish => vec![(CipherType::Twofish, 0), (CipherType::Kuznyechik, 32)],
         }
     }
 }
@@ -77,6 +104,8 @@ enum CipherInstance {
     Aes(AesCipher),
     Serpent(SerpentCipher),
     Twofish(TwofishCipher),
+    Camellia(CamelliaCipher),
+    Kuznyechik(KuznyechikCipher),
 }
 
 impl CipherInstance {
@@ -85,6 +114,8 @@ impl CipherInstance {
             Self::Aes(c) => c.encrypt_block(block),
             Self::Serpent(c) => c.encrypt_block(block),
             Self::Twofish(c) => c.encrypt_block(block),
+            Self::Camellia(c) => c.encrypt_block(block),
+            Self::Kuznyechik(c) => c.encrypt_block(block),
         }
     }
 
@@ -93,6 +124,8 @@ impl CipherInstance {
             Self::Aes(c) => c.decrypt_block(block),
             Self::Serpent(c) => c.decrypt_block(block),
             Self::Twofish(c) => c.decrypt_block(block),
+            Self::Camellia(c) => c.decrypt_block(block),
+            Self::Kuznyechik(c) => c.decrypt_block(block),
         }
     }
 }
@@ -166,6 +199,33 @@ impl CascadeCipher {
                 ciphers.push(CipherInstance::Twofish(TwofishCipher::new(&key[offset..offset + 32])?));
                 offset += 32;
                 ciphers.push(CipherInstance::Serpent(SerpentCipher::new(&key[offset..offset + 32])?));
+            }
+            CascadeMode::CamelliaKuznyechik => {
+                ciphers.push(CipherInstance::Camellia(CamelliaCipher::new(&key[offset..offset + 32])?));
+                offset += 32;
+                ciphers.push(CipherInstance::Kuznyechik(KuznyechikCipher::new(&key[offset..offset + 32])?));
+            }
+            CascadeMode::CamelliaSerpent => {
+                ciphers.push(CipherInstance::Camellia(CamelliaCipher::new(&key[offset..offset + 32])?));
+                offset += 32;
+                ciphers.push(CipherInstance::Serpent(SerpentCipher::new(&key[offset..offset + 32])?));
+            }
+            CascadeMode::KuznyechikAes => {
+                ciphers.push(CipherInstance::Kuznyechik(KuznyechikCipher::new(&key[offset..offset + 32])?));
+                offset += 32;
+                ciphers.push(CipherInstance::Aes(AesCipher::new(&key[offset..offset + 32])?));
+            }
+            CascadeMode::KuznyechikSerpentCamellia => {
+                ciphers.push(CipherInstance::Kuznyechik(KuznyechikCipher::new(&key[offset..offset + 32])?));
+                offset += 32;
+                ciphers.push(CipherInstance::Serpent(SerpentCipher::new(&key[offset..offset + 32])?));
+                offset += 32;
+                ciphers.push(CipherInstance::Camellia(CamelliaCipher::new(&key[offset..offset + 32])?));
+            }
+            CascadeMode::KuznyechikTwofish => {
+                ciphers.push(CipherInstance::Kuznyechik(KuznyechikCipher::new(&key[offset..offset + 32])?));
+                offset += 32;
+                ciphers.push(CipherInstance::Twofish(TwofishCipher::new(&key[offset..offset + 32])?));
             }
         }
 
@@ -268,8 +328,13 @@ mod tests {
             (CascadeMode::AesTwofish, 64),
             (CascadeMode::SerpentAes, 64),
             (CascadeMode::TwofishSerpent, 64),
+            (CascadeMode::CamelliaKuznyechik, 64),
+            (CascadeMode::CamelliaSerpent, 64),
+            (CascadeMode::KuznyechikAes, 64),
+            (CascadeMode::KuznyechikTwofish, 64),
             (CascadeMode::AesTwofishSerpent, 96),
             (CascadeMode::SerpentTwofishAes, 96),
+            (CascadeMode::KuznyechikSerpentCamellia, 96),
         ];
 
         for (mode, key_size) in modes {

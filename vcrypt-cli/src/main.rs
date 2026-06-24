@@ -142,6 +142,11 @@ fn parse_cipher(s: &str) -> Option<CipherType> {
         "serpent-aes" => Some(CipherType::SerpentAes),
         "serpent-twofish-aes" => Some(CipherType::SerpentTwofishAes),
         "twofish-serpent" => Some(CipherType::TwofishSerpent),
+        "camellia-kuznyechik" => Some(CipherType::CamelliaKuznyechik),
+        "camellia-serpent" => Some(CipherType::CamelliaSerpent),
+        "kuznyechik-aes" => Some(CipherType::KuznyechikAes),
+        "kuznyechik-serpent-camellia" => Some(CipherType::KuznyechikSerpentCamellia),
+        "kuznyechik-twofish" => Some(CipherType::KuznyechikTwofish),
         _ => None,
     }
 }

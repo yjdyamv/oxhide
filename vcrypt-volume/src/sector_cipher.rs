@@ -58,6 +58,11 @@ pub fn create_sector_cipher(cipher: CipherType, key: &[u8]) -> VolResult<Box<dyn
                 CipherType::SerpentAes => CascadeMode::SerpentAes,
                 CipherType::SerpentTwofishAes => CascadeMode::SerpentTwofishAes,
                 CipherType::TwofishSerpent => CascadeMode::TwofishSerpent,
+                CipherType::CamelliaKuznyechik => CascadeMode::CamelliaKuznyechik,
+                CipherType::CamelliaSerpent => CascadeMode::CamelliaSerpent,
+                CipherType::KuznyechikAes => CascadeMode::KuznyechikAes,
+                CipherType::KuznyechikSerpentCamellia => CascadeMode::KuznyechikSerpentCamellia,
+                CipherType::KuznyechikTwofish => CascadeMode::KuznyechikTwofish,
                 _ => return Err(VolumeError::Unsupported(format!("unknown cipher"))),
             };
             let passes = build_cascade_passes(mode, key)?;

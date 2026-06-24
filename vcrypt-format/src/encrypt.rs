@@ -56,6 +56,11 @@ fn apply_xts(cipher: CipherType, key: &[u8], encrypted_area: &mut [u8], encrypt:
         CipherType::SerpentAes => apply_xts_cascade(CascadeMode::SerpentAes, key, encrypted_area, encrypt),
         CipherType::SerpentTwofishAes => apply_xts_cascade(CascadeMode::SerpentTwofishAes, key, encrypted_area, encrypt),
         CipherType::TwofishSerpent => apply_xts_cascade(CascadeMode::TwofishSerpent, key, encrypted_area, encrypt),
+        CipherType::CamelliaKuznyechik => apply_xts_cascade(CascadeMode::CamelliaKuznyechik, key, encrypted_area, encrypt),
+        CipherType::CamelliaSerpent => apply_xts_cascade(CascadeMode::CamelliaSerpent, key, encrypted_area, encrypt),
+        CipherType::KuznyechikAes => apply_xts_cascade(CascadeMode::KuznyechikAes, key, encrypted_area, encrypt),
+        CipherType::KuznyechikSerpentCamellia => apply_xts_cascade(CascadeMode::KuznyechikSerpentCamellia, key, encrypted_area, encrypt),
+        CipherType::KuznyechikTwofish => apply_xts_cascade(CascadeMode::KuznyechikTwofish, key, encrypted_area, encrypt),
     }
 }
 

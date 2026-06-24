@@ -96,6 +96,16 @@ pub enum CipherType {
     SerpentTwofishAes,
     /// Twofish-Serpent cascade
     TwofishSerpent,
+    /// Camellia-Kuznyechik cascade
+    CamelliaKuznyechik,
+    /// Camellia-Serpent cascade
+    CamelliaSerpent,
+    /// Kuznyechik-AES cascade
+    KuznyechikAes,
+    /// Kuznyechik-Serpent-Camellia cascade
+    KuznyechikSerpentCamellia,
+    /// Kuznyechik-Twofish cascade
+    KuznyechikTwofish,
 }
 
 impl CipherType {
@@ -112,6 +122,11 @@ impl CipherType {
             Self::SerpentAes,
             Self::SerpentTwofishAes,
             Self::TwofishSerpent,
+            Self::CamelliaKuznyechik,
+            Self::CamelliaSerpent,
+            Self::KuznyechikAes,
+            Self::KuznyechikSerpentCamellia,
+            Self::KuznyechikTwofish,
         ]
     }
 
@@ -128,6 +143,11 @@ impl CipherType {
             Self::SerpentAes => 64,
             Self::SerpentTwofishAes => 96,
             Self::TwofishSerpent => 64,
+            Self::CamelliaKuznyechik => 64,
+            Self::CamelliaSerpent => 64,
+            Self::KuznyechikAes => 64,
+            Self::KuznyechikSerpentCamellia => 96,
+            Self::KuznyechikTwofish => 64,
         }
     }
 
@@ -144,6 +164,11 @@ impl CipherType {
             Self::SerpentAes => "Serpent-AES",
             Self::SerpentTwofishAes => "Serpent-Twofish-AES",
             Self::TwofishSerpent => "Twofish-Serpent",
+            Self::CamelliaKuznyechik => "Camellia-Kuznyechik",
+            Self::CamelliaSerpent => "Camellia-Serpent",
+            Self::KuznyechikAes => "Kuznyechik-AES",
+            Self::KuznyechikSerpentCamellia => "Kuznyechik-Serpent-Camellia",
+            Self::KuznyechikTwofish => "Kuznyechik-Twofish",
         }
     }
 
@@ -156,6 +181,11 @@ impl CipherType {
                 | Self::SerpentAes
                 | Self::SerpentTwofishAes
                 | Self::TwofishSerpent
+                | Self::CamelliaKuznyechik
+                | Self::CamelliaSerpent
+                | Self::KuznyechikAes
+                | Self::KuznyechikSerpentCamellia
+                | Self::KuznyechikTwofish
         )
     }
 
@@ -163,8 +193,11 @@ impl CipherType {
     pub fn cipher_count(&self) -> usize {
         match self {
             Self::Aes | Self::Serpent | Self::Twofish | Self::Camellia | Self::Kuznyechik => 1,
-            Self::AesTwofish | Self::SerpentAes | Self::TwofishSerpent => 2,
-            Self::AesTwofishSerpent | Self::SerpentTwofishAes => 3,
+            Self::AesTwofish | Self::SerpentAes | Self::TwofishSerpent
+            | Self::CamelliaKuznyechik | Self::CamelliaSerpent
+            | Self::KuznyechikAes | Self::KuznyechikTwofish => 2,
+            Self::AesTwofishSerpent | Self::SerpentTwofishAes
+            | Self::KuznyechikSerpentCamellia => 3,
         }
     }
 }

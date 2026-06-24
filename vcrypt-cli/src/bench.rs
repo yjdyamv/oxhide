@@ -1,14 +1,12 @@
 //! Cryptographic benchmark — measures cipher, KDF, and hash performance.
 
 use std::time::Instant;
-use vcrypt_core::ciphers::{AesCipher, BlockCipher, CamelliaCipher, CipherType,
-    KuznyechikCipher, SerpentCipher, TwofishCipher};
+use vcrypt_core::ciphers::CipherType;
 use vcrypt_core::hash::{Blake2sHash, HashFunction, Sha256Hash, Sha512Hash,
     StreebogHash, WhirlpoolHash};
 use vcrypt_core::kdf::{Argon2idKdf, KeyDerivation,
     Pbkdf2Blake2s, Pbkdf2Sha256, Pbkdf2Sha512, Pbkdf2Streebog, Pbkdf2Whirlpool};
-use vcrypt_core::xts::XtsMode;
-use vcrypt_core::CryptoError;
+use vcrypt_volume::io::SectorCipher;
 
 const BUF_MB: usize = 16;
 const MIN_TIME_MS: u128 = 200;
@@ -57,70 +55,11 @@ fn bench_ciphers() {
 fn measure_xts(ct: CipherType, key: &[u8], data: &[u8], encrypt: bool) -> Option<f64> {
     let need = ct.key_size() * 2;
     let k = &key[..need.min(key.len())];
-
-    match ct {
-        CipherType::Aes => {
-            let xts = XtsMode::new(k, |kb| {
-                AesCipher::new(kb).map_err(|e| CryptoError::CipherInitFailed(format!("aes: {}", e)))
-            }).ok()?;
-            measure_xts_loop(&xts, data, encrypt)
-        }
-        CipherType::Serpent => {
-            let xts = XtsMode::new(k, |kb| {
-                SerpentCipher::new(kb).map_err(|e| CryptoError::CipherInitFailed(format!("serpent: {}", e)))
-            }).ok()?;
-            measure_xts_loop(&xts, data, encrypt)
-        }
-        CipherType::Twofish => {
-            let xts = XtsMode::new(k, |kb| {
-                TwofishCipher::new(kb).map_err(|e| CryptoError::CipherInitFailed(format!("twofish: {}", e)))
-            }).ok()?;
-            measure_xts_loop(&xts, data, encrypt)
-        }
-        CipherType::Camellia => {
-            let xts = XtsMode::new(k, |kb| {
-                CamelliaCipher::new(kb).map_err(|e| CryptoError::CipherInitFailed(format!("camellia: {}", e)))
-            }).ok()?;
-            measure_xts_loop(&xts, data, encrypt)
-        }
-        CipherType::Kuznyechik => {
-            let xts = XtsMode::new(k, |kb| {
-                KuznyechikCipher::new(kb).map_err(|e| CryptoError::CipherInitFailed(format!("kuznyechik: {}", e)))
-            }).ok()?;
-            measure_xts_loop(&xts, data, encrypt)
-        }
-        _ => {
-            let sc = vcrypt_volume::create_sector_cipher(ct, k).ok()?;
-            measure_sector_loop(sc.as_ref(), data, encrypt)
-        }
-    }
+    let sc = vcrypt_volume::create_sector_cipher(ct, k).ok()?;
+    measure_sector_loop(sc.as_ref(), data, encrypt)
 }
 
-fn measure_xts_loop<C: BlockCipher>(xts: &XtsMode<C>, data: &[u8], encrypt: bool) -> Option<f64> {
-    let mut buf = data.to_vec();
-    let start = Instant::now();
-    let mut loops = 0u64;
-    let mut sector = 0u64;
-
-    while start.elapsed().as_millis() < MIN_TIME_MS {
-        for chunk in buf.chunks_mut(512) {
-            if encrypt {
-                xts.encrypt(sector, chunk).ok()?;
-            } else {
-                xts.decrypt(sector, chunk).ok()?;
-            }
-            sector += 1;
-        }
-        sector %= (buf.len() / 512) as u64;
-        loops += 1;
-    }
-
-    let ms = start.elapsed().as_millis().max(1);
-    let bytes = loops * buf.len() as u64;
-    Some(bytes as f64 / 1024.0 / 1024.0 / (ms as f64 / 1000.0))
-}
-
-fn measure_sector_loop(cipher: &dyn vcrypt_volume::io::SectorCipher, data: &[u8], encrypt: bool) -> Option<f64> {
+fn measure_sector_loop(cipher: &dyn SectorCipher, data: &[u8], encrypt: bool) -> Option<f64> {
     let mut buf = data.to_vec();
     let start = Instant::now();
     let mut loops = 0u64;
