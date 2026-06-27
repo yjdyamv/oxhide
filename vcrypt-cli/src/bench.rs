@@ -1,6 +1,12 @@
 //! Cryptographic benchmark — measures cipher, KDF, and hash performance.
+//!
+//! Cipher benchmarks run both **serial** (single-threaded) and **parallel**
+//! (rayon multi-threaded) to show the speedup from multi-core XTS processing.
+//! Each 512-byte sector is independent in XTS mode, so parallelization is
+//! safe and produces identical results.
 
 use std::time::Instant;
+use rayon::prelude::*;
 use vcrypt_core::ciphers::CipherType;
 use vcrypt_core::hash::{Blake2sHash, HashFunction, Sha256Hash, Sha512Hash,
     StreebogHash, WhirlpoolHash};
@@ -13,11 +19,12 @@ const MIN_TIME_MS: u128 = 200;
 
 pub fn run_benchmark(kind: &str) {
     match kind {
-        "cipher" => bench_ciphers(),
+        "cipher" => bench_ciphers(false),
+        "cipher-parallel" => bench_ciphers(true),
         "kdf" => bench_kdfs(),
         "hash" => bench_hashes(),
         _ => {
-            bench_ciphers();
+            bench_ciphers(true);
             println!();
             bench_kdfs();
             println!();
@@ -26,39 +33,103 @@ pub fn run_benchmark(kind: &str) {
     }
 }
 
-fn bench_ciphers() {
-    println!("==> Encryption Benchmark (XTS, {BUF_MB} MB, >{MIN_TIME_MS} ms)");
-    println!("{:<32} {:>10} {:>10} {:>10}", "Algorithm", "Enc MB/s", "Dec MB/s", "Mean");
-    println!("{:-<64}", "");
+// -----------------------------------------------------------------------
+// Cipher benchmark (serial + parallel)
+// -----------------------------------------------------------------------
 
-    let mut results: Vec<(String, f64, f64)> = Vec::new();
+fn bench_ciphers(show_parallel: bool) {
+    let title = if show_parallel {
+        format!("Encryption Benchmark (XTS, {BUF_MB} MB, serial + parallel, >{MIN_TIME_MS} ms)")
+    } else {
+        format!("Encryption Benchmark (XTS, {BUF_MB} MB, serial only, >{MIN_TIME_MS} ms)")
+    };
+    println!("==> {title}");
+
+    if show_parallel {
+        println!(
+            "{:<28} {:>10} {:>10} {:>10} {:>10} {:>8}",
+            "Algorithm", "Enc Ser", "Dec Ser", "Enc Par", "Dec Par", "Speedup"
+        );
+    } else {
+        println!("{:<28} {:>10} {:>10} {:>10}", "Algorithm", "Enc MB/s", "Dec MB/s", "Mean");
+    }
+    println!("{:-<80}", "");
+
+    let mut results: Vec<(String, f64, f64, Option<f64>, Option<f64>)> = Vec::new();
 
     for &ct in CipherType::all_supported() {
         let ks = ct.key_size() * 2;
         let key = vec![0xAAu8; ks.min(128)];
         let data = vec![0x42u8; BUF_MB * 1024 * 1024];
 
-        let enc = measure_xts(ct, &key, &data, true);
-        let dec = measure_xts(ct, &key, &data, false);
-        if let (Some(e), Some(d)) = (enc, dec) {
-            results.push((ct.name().to_string(), e, d));
+        let enc_s = measure_xts(ct, &key, &data, true, false);
+        let dec_s = measure_xts(ct, &key, &data, false, false);
+
+        let (enc_p, dec_p) = if show_parallel {
+            (
+                measure_xts(ct, &key, &data, true, true),
+                measure_xts(ct, &key, &data, false, true),
+            )
+        } else {
+            (None, None)
+        };
+
+        if let (Some(es), Some(ds)) = (enc_s, dec_s) {
+            results.push((ct.name().to_string(), es, ds, enc_p, dec_p));
         }
     }
 
-    results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
-    for (name, enc, dec) in &results {
-        let mean = (enc + dec) / 2.0;
-        println!("{:<32} {:>8.0}   {:>8.0}   {:>8.0}", name, enc, dec, mean);
+    // Sort by serial mean (descending)
+    results.sort_by(|a, b| {
+        let ma = (a.1 + a.2) / 2.0;
+        let mb = (b.1 + b.2) / 2.0;
+        mb.partial_cmp(&ma).unwrap()
+    });
+
+    for (name, enc_s, dec_s, enc_p, dec_p) in &results {
+        if show_parallel {
+            let speedup = enc_p
+                .and_then(|p| if enc_s > &0.0 { Some(p / enc_s) } else { None })
+                .unwrap_or(0.0);
+            println!(
+                "{:<28} {:>8.0}   {:>8.0}   {:>8.0}   {:>8.0}   {:>6.1}x",
+                name, enc_s, dec_s,
+                enc_p.unwrap_or(0.0),
+                dec_p.unwrap_or(0.0),
+                speedup
+            );
+        } else {
+            let mean = (enc_s + dec_s) / 2.0;
+            println!("{:<28} {:>8.0}   {:>8.0}   {:>8.0}", name, enc_s, dec_s, mean);
+        }
+    }
+
+    if show_parallel {
+        let nthreads = rayon::current_num_threads();
+        println!("\n  Parallel: {} threads | {} MB buffer | {} ciphers tested",
+            nthreads, BUF_MB, results.len());
     }
 }
 
-fn measure_xts(ct: CipherType, key: &[u8], data: &[u8], encrypt: bool) -> Option<f64> {
+fn measure_xts(
+    ct: CipherType,
+    key: &[u8],
+    data: &[u8],
+    encrypt: bool,
+    parallel: bool,
+) -> Option<f64> {
     let need = ct.key_size() * 2;
     let k = &key[..need.min(key.len())];
     let sc = vcrypt_volume::create_sector_cipher(ct, k).ok()?;
-    measure_sector_loop(sc.as_ref(), data, encrypt)
+
+    if parallel {
+        measure_sector_parallel(sc.as_ref(), data, encrypt)
+    } else {
+        measure_sector_loop(sc.as_ref(), data, encrypt)
+    }
 }
 
+/// Serial benchmark — process sectors one by one in a single thread.
 fn measure_sector_loop(cipher: &dyn SectorCipher, data: &[u8], encrypt: bool) -> Option<f64> {
     let mut buf = data.to_vec();
     let start = Instant::now();
@@ -82,6 +153,40 @@ fn measure_sector_loop(cipher: &dyn SectorCipher, data: &[u8], encrypt: bool) ->
     let bytes = loops * buf.len() as u64;
     Some(bytes as f64 / 1024.0 / 1024.0 / (ms as f64 / 1000.0))
 }
+
+/// Parallel benchmark — use rayon to process sectors across all CPU cores.
+///
+/// Each 512-byte sector is independent in XTS mode (the sector index is the
+/// tweak), so parallelization is safe with no shared mutable state.  The
+/// cipher object is `Send + Sync` (read-only during encryption), and each
+/// chunk gets a unique `&mut [u8]` slice.
+fn measure_sector_parallel(cipher: &dyn SectorCipher, data: &[u8], encrypt: bool) -> Option<f64> {
+    let mut buf = data.to_vec();
+    let start = Instant::now();
+    let mut loops = 0u64;
+
+    while start.elapsed().as_millis() < MIN_TIME_MS {
+        // Split the buffer into 512-byte sectors and process in parallel.
+        // enumerate() gives us the sector index for the XTS tweak.
+        buf.par_chunks_mut(512).enumerate().for_each(|(i, chunk)| {
+            let sector = i as u64;
+            if encrypt {
+                let _ = cipher.encrypt_sector(sector, chunk);
+            } else {
+                let _ = cipher.decrypt_sector(sector, chunk);
+            }
+        });
+        loops += 1;
+    }
+
+    let ms = start.elapsed().as_millis().max(1);
+    let bytes = loops * buf.len() as u64;
+    Some(bytes as f64 / 1024.0 / 1024.0 / (ms as f64 / 1000.0))
+}
+
+// -----------------------------------------------------------------------
+// KDF benchmark
+// -----------------------------------------------------------------------
 
 fn bench_kdfs() {
     println!("==> KDF Benchmark (192-byte key, 21-char passphrase)");
@@ -129,6 +234,10 @@ fn bench_one_kdf(kdf: &dyn KeyDerivation, pwd: &[u8], salt: &[u8; 64], iters: u3
     }
     start.elapsed().as_millis()
 }
+
+// -----------------------------------------------------------------------
+// Hash benchmark
+// -----------------------------------------------------------------------
 
 fn bench_hashes() {
     println!("==> Hash Benchmark (1 KB blocks, >1s)");

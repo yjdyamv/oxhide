@@ -1,0 +1,36 @@
+[package]
+name = "vcrypt-driver"
+version = "0.0.1"
+edition = "2021"
+description = "Windows kernel driver for mounting VeraCrypt-compatible encrypted volumes"
+
+[package.metadata.wdk.driver-model]
+driver-type = "WDM"
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+wdk-build = "0.5.1"
+
+[dependencies]
+vcrypt-core = { path = "../vcrypt-core", default-features = false, features = ["kernel"] }
+wdk = "0.4.1"
+wdk-alloc = "0.4.1"
+wdk-panic = "0.4.1"
+wdk-sys = "0.5.1"
+
+[features]
+default = ["nightly"]
+nightly = ["wdk/nightly", "wdk-sys/nightly"]
+
+[patch.crates-io]
+wdk-sys = { path = "vendor/wdk-sys" }
+lsx = { path = "../vcrypt-core/vendor/lsx" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true

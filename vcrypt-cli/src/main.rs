@@ -4,6 +4,8 @@ use vcrypt_core::kdf::KdfAlgorithm;
 use vcrypt_volume::OpenVolume;
 
 mod bench;
+#[cfg(windows)]
+mod kernel_ioctl;
 
 #[derive(Parser)]
 #[command(name = "vcrypt", version = "0.1.0", about = "VeraCrypt-compatible Rust CLI")]
@@ -78,23 +80,9 @@ enum Commands {
     },
     Test,
     Benchmark {
+        /// Benchmark type: all, cipher, cipher-parallel, kdf, hash
         #[arg(default_value = "all")]
         kind: String,
-    },
-    Mount {
-        volume: String,
-        #[arg(short, long)]
-        mountpoint: String,
-        #[arg(short, long)]
-        password: Option<String>,
-        #[arg(short = 'k', long)]
-        kdf: Option<String>,
-        #[arg(short = 'm', long)]
-        pim: Option<i32>,
-        #[arg(short = 'f', long)]
-        keyfile: Vec<String>,
-        #[arg(short = 'r', long)]
-        read_only: bool,
     },
     Change {
         volume: String,
@@ -121,6 +109,27 @@ enum Commands {
         pim: Option<i32>,
         #[arg(short = 'f', long)]
         keyfile: Vec<String>,
+    },
+    #[cfg(windows)]
+    Mount {
+        volume: String,
+        #[arg(short, long)]
+        drive: String,
+        #[arg(short, long)]
+        password: Option<String>,
+        #[arg(short = 'k', long)]
+        kdf: Option<String>,
+        #[arg(short = 'm', long)]
+        pim: Option<i32>,
+        #[arg(short = 'f', long)]
+        keyfile: Vec<String>,
+        #[arg(short = 'r', long)]
+        read_only: bool,
+    },
+    #[cfg(windows)]
+    Unmount {
+        #[arg(short, long)]
+        drive: String,
     },
 }
 
@@ -150,14 +159,19 @@ fn main() {
         Commands::Benchmark { kind } => {
             bench::run_benchmark(&kind);
         }
-        Commands::Mount { volume, mountpoint, password, kdf, pim, keyfile, read_only } => {
-            cmd_mount(&volume, &mountpoint, password, kdf.as_deref(), pim, &keyfile, read_only);
-        }
         Commands::Change { volume, password, new_password, kdf, pim, keyfile, new_keyfile } => {
             cmd_change(&volume, password, new_password, kdf.as_deref(), pim, &keyfile, &new_keyfile);
         }
         Commands::Restore { volume, password, kdf, pim, keyfile } => {
             cmd_restore(&volume, password, kdf.as_deref(), pim, &keyfile);
+        }
+        #[cfg(windows)]
+        Commands::Mount { volume, drive, password, kdf, pim, keyfile, read_only } => {
+            cmd_mount_kernel(&volume, &drive, password, kdf.as_deref(), pim, &keyfile, read_only);
+        }
+        #[cfg(windows)]
+        Commands::Unmount { drive } => {
+            cmd_unmount_kernel(&drive);
         }
     }
 }
@@ -587,31 +601,34 @@ fn cmd_create_hidden(
     }
 }
 
-fn cmd_mount(
-    volume: &str, mountpoint: &str, password: Option<String>,
+#[cfg(windows)]
+fn cmd_mount_kernel(
+    volume: &str, drive: &str, password: Option<String>,
     kdf: Option<&str>, pim: Option<i32>, keyfile: &[String], read_only: bool,
 ) {
-    println!("==> Mounting volume: {}", volume);
-    println!("    Mount:     {}", mountpoint);
-    if read_only { println!("    Mode:      read-only"); }
+    println!("==> Mounting (kernel): {}", volume);
+    println!("    Drive:     {}", drive);
 
+    let drive_char = drive.chars().next().unwrap_or('X');
     let pw = password.unwrap_or_else(|| read_password("Password: "));
-    let kf = keyfile_refs(keyfile);
+    let kf: Vec<&str> = keyfile.iter().map(String::as_str).collect();
     let kdf_alg = kdf.and_then(parse_kdf);
 
-    println!("    Status:    mounting... (press Ctrl+C to unmount)");
-
-    #[cfg(windows)]
-    {
-        match vcrypt_fs::mount_volume(volume, pw.as_bytes(), &kf, kdf_alg, pim, mountpoint, read_only) {
-            Ok(()) => println!("    Status:    unmounted"),
-            Err(e) => println!("    Error:    {}", e),
-        }
+    match kernel_ioctl::mount_via_driver(
+        volume, drive_char, pw.as_bytes(), &kf, kdf_alg, pim, read_only,
+    ) {
+        Ok(()) => println!("    Status:    mounted as {}:", drive),
+        Err(e) => println!("    Error:     {}", e),
     }
-    #[cfg(not(windows))]
-    {
-        let _ = (volume, mountpoint, pw, kf, kdf_alg, pim, read_only);
-        println!("    Error:    mounting only supported on Windows (WinFSP)");
+}
+
+#[cfg(windows)]
+fn cmd_unmount_kernel(drive: &str) {
+    println!("==> Unmounting (kernel): {}", drive);
+    let drive_char = drive.chars().next().unwrap_or('X');
+    match kernel_ioctl::unmount_via_driver(drive_char) {
+        Ok(()) => println!("    Status:    unmounted"),
+        Err(e) => println!("    Error:     {}", e),
     }
 }
 

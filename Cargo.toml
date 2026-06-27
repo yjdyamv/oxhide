@@ -4,8 +4,8 @@ members = [
     "vcrypt-format",
     "vcrypt-volume",
     "vcrypt-cli",
-    "vcrypt-fs",
 ]
+exclude = ["vcrypt-driver"]
 resolver = "2"
 
 [workspace.package]
@@ -47,6 +47,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 log = "0.4.33"
 env_logger = "0.11.10"
 rpassword = "7.5.4"
+rayon = "1.10"
 
 # Testing
 criterion = "0.8.2"

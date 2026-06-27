@@ -1,0 +1,41 @@
+;
+; OxhideDriver.inf — Driver installation information file
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %Oxhide%
+CatalogFile = OxhideDriver.cat
+DriverVer   = 06/25/2026,0.0.1.0
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+vcrypt_driver.sys = 1
+
+[DefaultInstall]
+CopyFiles = OxhideDriver.CopyFiles
+
+[OxhideDriver.CopyFiles]
+vcrypt_driver.sys
+
+[DefaultInstall.Services]
+AddService = Oxhide, 0x00000002, OxhideDriver.Service
+
+[OxhideDriver.Service]
+DisplayName     = %OxhideService%
+ServiceType     = 1   ; SERVICE_KERNEL_DRIVER
+StartType       = 3   ; SERVICE_DEMAND_START
+ErrorControl    = 1   ; SERVICE_ERROR_NORMAL
+ServiceBinary   = %12%\vcrypt_driver.sys
+
+[Strings]
+Oxhide        = "Oxhide"
+DiskName      = "Oxhide Virtual Disk Driver"
+OxhideService = "Oxhide Virtual Disk Driver"

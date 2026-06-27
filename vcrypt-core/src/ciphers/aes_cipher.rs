@@ -61,7 +61,7 @@ impl BlockCipher for AesCipher {
     fn encrypt_blocks(&self, data: &mut [u8]) -> Result<()> {
         let n = data.len() / Self::BLOCK_SIZE;
         let blocks = unsafe {
-            std::slice::from_raw_parts_mut(
+            core::slice::from_raw_parts_mut(
                 data.as_mut_ptr() as *mut aes::cipher::Block::<Aes256>,
                 n,
             )
@@ -73,7 +73,7 @@ impl BlockCipher for AesCipher {
     fn decrypt_blocks(&self, data: &mut [u8]) -> Result<()> {
         let n = data.len() / Self::BLOCK_SIZE;
         let blocks = unsafe {
-            std::slice::from_raw_parts_mut(
+            core::slice::from_raw_parts_mut(
                 data.as_mut_ptr() as *mut aes::cipher::Block::<Aes256>,
                 n,
             )

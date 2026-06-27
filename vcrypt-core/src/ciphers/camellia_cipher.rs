@@ -47,7 +47,7 @@ impl BlockCipher for CamelliaCipher {
     fn encrypt_blocks(&self, data: &mut [u8]) -> Result<()> {
         let n = data.len() / Self::BLOCK_SIZE;
         let blocks = unsafe {
-            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut camellia::cipher::Block::<Camellia256>, n)
+            core::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut camellia::cipher::Block::<Camellia256>, n)
         };
         self.cipher.encrypt_blocks(blocks);
         Ok(())
@@ -56,7 +56,7 @@ impl BlockCipher for CamelliaCipher {
     fn decrypt_blocks(&self, data: &mut [u8]) -> Result<()> {
         let n = data.len() / Self::BLOCK_SIZE;
         let blocks = unsafe {
-            std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut camellia::cipher::Block::<Camellia256>, n)
+            core::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut camellia::cipher::Block::<Camellia256>, n)
         };
         self.cipher.decrypt_blocks(blocks);
         Ok(())

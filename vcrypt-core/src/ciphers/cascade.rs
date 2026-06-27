@@ -7,6 +7,9 @@
 use super::{AesCipher, BlockCipher, CamelliaCipher, CipherType, KuznyechikCipher, SerpentCipher, TwofishCipher};
 use crate::{CryptoError, Result};
 
+#[cfg(all(feature = "kernel", not(feature = "std")))]
+use alloc::vec::Vec;
+
 /// Cascade mode defines the order of ciphers in a cascade
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CascadeMode {

@@ -6,26 +6,31 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-# Cryptography
+# Always needed (ciphers for kernel + user mode)
 aes = { workspace = true }
-sha2 = { workspace = true }
-blake2 = { workspace = true }
-whirlpool = { workspace = true }
-streebog = { workspace = true }
-argon2 = { workspace = true }
-pbkdf2 = { workspace = true }
-hmac = { workspace = true }
-getrandom = { workspace = true }
 serpent = { workspace = true }
 lsx = { workspace = true }
 camellia = { workspace = true }
 kuznyechik = { workspace = true }
-
-# Security
 zeroize = { workspace = true }
 
+# std-only (hash, KDF, RNG — not used in kernel)
+sha2 = { workspace = true, optional = true }
+blake2 = { workspace = true, optional = true }
+whirlpool = { workspace = true, optional = true }
+streebog = { workspace = true, optional = true }
+argon2 = { workspace = true, optional = true }
+pbkdf2 = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+
 # Utilities
-thiserror = { workspace = true }
+thiserror = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+std = ["dep:thiserror", "dep:sha2", "dep:blake2", "dep:whirlpool", "dep:streebog", "dep:argon2", "dep:pbkdf2", "dep:hmac", "dep:getrandom"]
+kernel = []
 
 [dev-dependencies]
 hex = { workspace = true }
