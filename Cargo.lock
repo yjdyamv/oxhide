@@ -1193,6 +1193,7 @@ dependencies = [
  "log",
  "rayon",
  "rpassword",
+ "tempfile",
  "vcrypt-core",
  "vcrypt-format",
  "vcrypt-volume",

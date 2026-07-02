@@ -31,6 +31,7 @@ pub const IO_DISK_INCREMENT: i32 = 1;
 // Status codes
 // ---------------------------------------------------------------------------
 pub const STATUS_SUCCESS: NTSTATUS = 0;
+pub const STATUS_TIMEOUT: NTSTATUS = 0x00000102u32 as i32;
 pub const STATUS_PENDING: NTSTATUS = 0x00000103u32 as i32;
 pub const STATUS_BUFFER_TOO_SMALL: NTSTATUS = 0xC0000023u32 as i32;
 pub const STATUS_BUFFER_OVERFLOW: NTSTATUS = 0x80000005u32 as i32;
@@ -743,9 +744,22 @@ pub struct DRIVER_OBJECT {
     pub Type: CSHORT,
     pub Size: USHORT,
     pub DeviceObject: *mut DEVICE_OBJECT,
-    _pad0: [u8; 4],
     pub Flags: ULONG,
-    _pad1: [u8; 60],
+    // WDK fields between Flags and DriverInit (DriverStart, DriverSize,
+    // DriverSection, DriverExtension, DriverName, HardwareDatabase,
+    // FastIoDispatch) are not needed by this driver and are reserved here.
+    // Offsets on x64:
+    //   Flags      @ 0x10  (4 bytes)
+    //   DriverStart@ 0x18  (8 bytes)
+    //   DriverSize @ 0x20  (4 bytes + 4 padding)
+    //   DriverSect @ 0x28  (8 bytes)
+    //   DriverExt  @ 0x30  (8 bytes)
+    //   DriverName @ 0x38  (16 bytes, UNICODE_STRING)
+    //   HardwareDB @ 0x48  (8 bytes)
+    //   FastIoDisp @ 0x50  (8 bytes)
+    //   DriverInit @ 0x58  (8 bytes)
+    // => reserved = 0x58 - 0x14 = 0x44 = 68 bytes
+    _reserved: [u8; 68],
     pub DriverInit: PVOID,
     pub DriverStartIo: PVOID,
     pub DriverUnload: PVOID,
@@ -1053,6 +1067,11 @@ extern "system" {
         StartContext: PVOID,
     ) -> NTSTATUS;
     pub fn PsTerminateSystemThread(ExitStatus: NTSTATUS);
+    // `KeGetCurrentThread` is a macro in ntddk.h that expands to
+    // `PsGetCurrentThread`.  The actual kernel export is `PsGetCurrentThread`
+    // (returns a PETHREAD, which is implicitly usable as a PKTHREAD).  VeraCrypt
+    // calls the macro at Ntdriver.c:3262; we bind the export directly.
+    pub fn PsGetCurrentThread() -> PKTHREAD;
     pub fn KeSetPriorityThread(Thread: PKTHREAD, Priority: KPRIORITY) -> KPRIORITY;
     pub fn ObReferenceObjectByHandle(
         Handle: HANDLE,
@@ -1113,6 +1132,8 @@ const _: () = {
     assert!(core::mem::size_of::<IRP>() == 208);
     assert!(core::mem::size_of::<DEVICE_OBJECT>() == 336);
     assert!(core::mem::size_of::<DRIVER_OBJECT>() == 336);
+    assert!(core::mem::offset_of!(DRIVER_OBJECT, MajorFunction) == 0x70, "DRIVER_OBJECT.MajorFunction@0x70");
+    assert!(core::mem::offset_of!(DRIVER_OBJECT, DriverUnload) == 0x68, "DRIVER_OBJECT.DriverUnload@0x68");
     assert!(core::mem::size_of::<MOUNTMGR_CREATE_POINT_INPUT>() == 8);
     assert!(core::mem::size_of::<MOUNTMGR_MOUNT_POINT>() == 24);
     assert!(core::mem::size_of::<MOUNTDEV_SUGGESTED_LINK_NAME>() == 6);

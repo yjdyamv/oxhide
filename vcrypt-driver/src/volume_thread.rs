@@ -90,13 +90,13 @@ pub unsafe fn tc_start_volume_thread(
     }
 
     // Wait for the thread to finish TCOpenVolume (signals keCreateEvent).
-    let dummy: i64 = 0;
+    // NULL timeout => infinite wait.
     KeWaitForSingleObject(
         &mut ext.ke_create_event as *mut KEVENT as PVOID,
         Executive,
         KernelMode,
         FALSE,
-        &dummy as *const i64 as *mut i64,  // non-null = infinite wait
+        core::ptr::null_mut(),
     );
 
     // Reference the thread object so we can stop it later.
@@ -123,13 +123,16 @@ pub unsafe fn tc_stop_volume_thread(ext: &mut Extension) {
     KeReleaseSemaphore(&mut ext.request_semaphore, 0, 1, FALSE);
 
     if !ext.pe_thread.is_null() {
-        let dummy: i64 = 0;
+        // NULL timeout => infinite wait, ensuring the volume thread has fully
+        // exited (and released the host file / cipher) before we delete the
+        // device object.  A zero timeout would return immediately and let
+        // IoDeleteDevice race the still-running thread.
         KeWaitForSingleObject(
             ext.pe_thread as PVOID,
             Executive,
             KernelMode,
             FALSE,
-            &dummy as *const i64 as *mut i64,
+            core::ptr::null_mut(),
         );
         ObfDereferenceObject(ext.pe_thread as PVOID);
         ext.pe_thread = core::ptr::null_mut();
@@ -149,8 +152,8 @@ unsafe extern "system" fn volume_thread_proc(context: PVOID) {
     let device = block.device_object;
     let ext = &mut *((*device).DeviceExtension as *mut Extension);
 
-    // Set low-realtime priority (matching VeraCrypt).
-    KeSetPriorityThread(core::ptr::null_mut(), LOW_REALTIME_PRIORITY);
+    // Set low-realtime priority (matching VeraCrypt Ntdriver.c:3262).
+    KeSetPriorityThread(PsGetCurrentThread(), LOW_REALTIME_PRIORITY);
 
     // --- Extract fields from the packed MountStruct ---
     let m = &block.mount;
@@ -210,6 +213,7 @@ unsafe extern "system" fn volume_thread_proc(context: PVOID) {
         preserve_ts,
         exclusive,
     );
+    debug::kdbg_status("[Oxhide] tc_open_volume returned", nt_status);
 
     // Zeroize the local key buffer.
     key_buf.fill(0);

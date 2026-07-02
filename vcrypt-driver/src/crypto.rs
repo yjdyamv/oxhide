@@ -47,33 +47,13 @@ pub fn init_cipher_from_ea_and_key(ea: u32, key: &[u8]) -> Option<KernelSectorCi
 }
 
 /// Map a VeraCrypt encryption-algorithm ID (`ea`) to `CipherType`.
+/// Delegates to `vcrypt_driver_core::cipher_type_from_ea`.
 pub fn cipher_type_from_ea(ea: u32) -> Option<CipherType> {
-    match ea {
-        0x01 => Some(CipherType::Aes),
-        0x02 => Some(CipherType::Serpent),
-        0x03 => Some(CipherType::Twofish),
-        0x04 => Some(CipherType::Camellia),
-        0x05 => Some(CipherType::Kuznyechik),
-        0x11 => Some(CipherType::AesTwofish),
-        0x12 => Some(CipherType::AesTwofishSerpent),
-        0x13 => Some(CipherType::SerpentAes),
-        0x14 => Some(CipherType::SerpentTwofishAes),
-        0x15 => Some(CipherType::TwofishSerpent),
-        0x16 => Some(CipherType::CamelliaKuznyechik),
-        0x17 => Some(CipherType::CamelliaSerpent),
-        0x18 => Some(CipherType::KuznyechikAes),
-        0x19 => Some(CipherType::KuznyechikSerpentCamellia),
-        0x1A => Some(CipherType::KuznyechikTwofish),
-        _ => None,
-    }
+    vcrypt_driver_core::cipher_type_from_ea(ea)
 }
 
-/// Compute the virtual disk geometry following VeraCrypt's convention:
-/// - 1 track per cylinder, 1 sector per track
-/// - `NumberOfCylinders = DiskLength / BytesPerSector`
-/// - All 512-byte sector alignment for virtual geometry.
+/// Compute the virtual disk geometry following VeraCrypt's convention.
+/// Delegates to `vcrypt_driver_core::compute_virtual_geometry`.
 pub fn compute_virtual_geometry(disk_length: u64, bytes_per_sector: u32) -> (u64, u32, u32) {
-    let sector_count = disk_length / bytes_per_sector as u64;
-    let cylinders = sector_count.max(1);
-    (cylinders, 1, 1)
+    vcrypt_driver_core::compute_virtual_geometry(disk_length, bytes_per_sector)
 }

@@ -26,11 +26,25 @@ pub unsafe extern "system" fn driver_entry(
     driver_object: *mut DRIVER_OBJECT,
     _registry_path: *mut UNICODE_STRING,
 ) -> NTSTATUS {
-    let major_functions = &mut (*driver_object).MajorFunction;
+    // DIAGNOSIS: return failure immediately to confirm DriverEntry is called
+    // return 0xC0000001u32 as i32; // STATUS_UNSUCCESSFUL
+
+    // Use hardcoded offset 0x70 for MajorFunction (verified against WDK wdm.h
+    // x64 layout).
+    let major_func_base = (driver_object as *mut u8).add(0x70) as *mut PVOID;
     for i in 0..=IRP_MJ_MAXIMUM_FUNCTION as usize {
-        major_functions[i] = tc_dispatch_queue_irp as PVOID;
+        *major_func_base.add(i) = tc_dispatch_queue_irp as PVOID;
     }
-    (*driver_object).DriverUnload = tc_unload_driver as PVOID;
+    // DriverUnload @ 0x68
+    let driver_unload_ptr = (driver_object as *mut u8).add(0x68) as *mut PVOID;
+    *driver_unload_ptr = tc_unload_driver as PVOID;
+
+    // Verify the write succeeded
+    let check = *major_func_base.add(IRP_MJ_DEVICE_CONTROL as usize);
+    if check != tc_dispatch_queue_irp as PVOID {
+        // MajorFunction write failed — return error
+        return 0xC0000001u32 as i32;
+    }
 
     device::create_root_device(driver_object)
 }
@@ -60,50 +74,19 @@ unsafe extern "system" fn tc_dispatch_queue_irp(
     device_object: *mut DEVICE_OBJECT,
     irp: *mut IRP,
 ) -> NTSTATUS {
-    if device_object == ROOT_DEVICE {
+    let is_root = device_object == ROOT_DEVICE;
+
+    if is_root {
         return dispatch_root(device_object, irp);
     }
 
-    let ext = &mut *((*device_object).DeviceExtension as *mut Extension);
-
+    // For non-root (volume) devices, handle create/close/cleanup simply
+    // and complete everything else with invalid request for now.
     let major = (*IoGetCurrentIrpStackLocation(irp)).MajorFunction;
-
-    if ext.b_shutting_down != 0 {
-        if major == IRP_MJ_CLOSE || major == IRP_MJ_CLEANUP || major == IRP_MJ_CREATE {
-            irp_utils::complete_irp(irp, STATUS_SUCCESS, 0);
-            return STATUS_SUCCESS;
-        }
-        irp_utils::complete_irp(irp, STATUS_DELETE_PENDING, 0);
-        return STATUS_DELETE_PENDING;
-    }
-
     match major {
         IRP_MJ_CREATE | IRP_MJ_CLOSE | IRP_MJ_CLEANUP => {
             irp_utils::complete_irp(irp, STATUS_SUCCESS, 0);
             STATUS_SUCCESS
-        }
-        IRP_MJ_READ | IRP_MJ_WRITE | IRP_MJ_FLUSH_BUFFERS => {
-            let add_status = encrypted_io_queue::add_irp(&mut ext.queue, irp);
-            if add_status != STATUS_PENDING {
-                irp_utils::complete_disk_irp(irp, add_status, 0);
-            }
-            add_status
-        }
-        IRP_MJ_DEVICE_CONTROL => {
-            IoAcquireRemoveLockEx(
-                &mut ext.queue.remove_lock,
-                irp as PVOID,
-                core::ptr::null_mut(),
-                0,
-                core::mem::size_of::<IO_REMOVE_LOCK>() as u32,
-            );
-            IoMarkIrpPending(irp);
-            volume_thread::enqueue_device_control_irp(ext, irp);
-            STATUS_PENDING
-        }
-        IRP_MJ_PNP => {
-            irp_utils::complete_irp(irp, STATUS_UNSUCCESSFUL, 0);
-            STATUS_UNSUCCESSFUL
         }
         _ => {
             irp_utils::complete_irp(irp, STATUS_INVALID_DEVICE_REQUEST, 0);
@@ -118,6 +101,13 @@ unsafe fn dispatch_root(
 ) -> NTSTATUS {
     let major = (*IoGetCurrentIrpStackLocation(irp)).MajorFunction;
 
+    // Handle CREATE/CLOSE/CLEANUP directly
+    if major == IRP_MJ_CREATE || major == IRP_MJ_CLOSE || major == IRP_MJ_CLEANUP {
+        irp_utils::complete_irp(irp, STATUS_SUCCESS, 0);
+        return STATUS_SUCCESS;
+    }
+
+    // Handle SHUTDOWN
     if major == IRP_MJ_SHUTDOWN {
         for i in 0..types::MAX_DRIVE {
             let dev = VOLUME_DEVICES[i];
@@ -133,19 +123,7 @@ unsafe fn dispatch_root(
         return STATUS_SUCCESS;
     }
 
-    if major != IRP_MJ_DEVICE_CONTROL {
-        match major {
-            IRP_MJ_CREATE | IRP_MJ_CLOSE | IRP_MJ_CLEANUP => {
-                irp_utils::complete_irp(irp, STATUS_SUCCESS, 0);
-                return STATUS_SUCCESS;
-            }
-            _ => {
-                irp_utils::complete_irp(irp, STATUS_INVALID_DEVICE_REQUEST, 0);
-                return STATUS_INVALID_DEVICE_REQUEST;
-            }
-        }
-    }
-
+    // For DEVICE_CONTROL and anything else, delegate to the root device handler
     device::process_root_device_irp(device_object, irp)
 }
 

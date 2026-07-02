@@ -1,5 +1,6 @@
 [build]
-rustflags = [
-  "-C",
-  "target-feature=+crt-static",
-]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+LIBCLANG_PATH = "D:\\LLVM\\bin"
+Version_Number = "10.0.26100.0"

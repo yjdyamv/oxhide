@@ -1,9 +1,9 @@
 [package]
 name = "test-wdm"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-authors.workspace = true
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["test"]
 
 [package.metadata.wdk.driver-model]
 driver-type = "WDM"

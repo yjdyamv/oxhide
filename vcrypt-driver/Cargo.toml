@@ -15,6 +15,7 @@ wdk-build = "0.5.1"
 
 [dependencies]
 vcrypt-core = { path = "../vcrypt-core", default-features = false, features = ["kernel"] }
+vcrypt-driver-core = { path = "../vcrypt-driver-core" }
 wdk = "0.4.1"
 wdk-alloc = "0.4.1"
 wdk-panic = "0.4.1"

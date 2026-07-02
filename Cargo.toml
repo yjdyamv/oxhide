@@ -5,7 +5,7 @@ members = [
     "vcrypt-volume",
     "vcrypt-cli",
 ]
-exclude = ["vcrypt-driver"]
+exclude = ["vcrypt-driver", "test-wdm", "vcrypt-driver-core"]
 resolver = "2"
 
 [workspace.package]

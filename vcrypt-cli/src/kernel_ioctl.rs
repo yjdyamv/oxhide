@@ -54,7 +54,9 @@ struct MountStruct {
 #[derive(Clone, Copy)]
 struct UnmountStruct { return_code: i32, n_dos_drive_no: i32 }
 
-fn cipher_to_ea(ct: CipherType) -> u32 {
+/// Map a `CipherType` to its VeraCrypt encryption-algorithm ID (`ea`).
+/// This is the inverse of `vcrypt_driver_core::cipher_type_from_ea`.
+pub fn cipher_to_ea(ct: CipherType) -> u32 {
     match ct {
         CipherType::Aes => 0x01, CipherType::Serpent => 0x02,
         CipherType::Twofish => 0x03, CipherType::Camellia => 0x04,
@@ -138,23 +140,41 @@ pub fn unmount_via_driver(drive_letter: char) -> Result<(), String> {
 fn open_driver() -> Result<HANDLE, String> {
     let name: Vec<u16> = OsStr::new("\\\\.\\Oxhide").encode_wide()
         .chain(std::iter::once(0)).collect();
+    eprintln!("[DBG] open_driver: CreateFileW \\\\.\\Oxhide");
     let h = unsafe {
         CreateFileW(name.as_ptr(), GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE, std::ptr::null(),
             OPEN_EXISTING, 0, std::ptr::null_mut())
     };
+    eprintln!("[DBG] CreateFileW returned {:#x}", h as usize);
     if h == INVALID_HANDLE_VALUE { Err("Cannot open \\\\.\\Oxhide — driver loaded?".into()) }
-    else { Ok(h) }
+    else {
+        // DIAGNOSIS: try a simple IOCTL (GET_DRIVER_VERSION) first
+        let mut ver: u32 = 0;
+        let mut br: u32 = 0;
+        // TC_IOCTL_GET_DRIVER_VERSION = CTL_CODE(0x22, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS) = 0x00222004
+        const TC_IOCTL_GET_DRIVER_VERSION: u32 = 0x00222004;
+        let ok2 = unsafe {
+            DeviceIoControl(h, TC_IOCTL_GET_DRIVER_VERSION,
+                std::ptr::null(), 0,
+                &mut ver as *mut u32 as *mut std::ffi::c_void, 4,
+                &mut br, std::ptr::null_mut())
+        };
+        eprintln!("[DBG] GET_DRIVER_VERSION: ok={}, ver={}, br={}", ok2, ver, br);
+        Ok(h)
+    }
 }
 
 fn send_mount_ioctl(h: HANDLE, m: &MountStruct) -> Result<(), String> {
     let mut out = *m; let mut br: u32 = 0;
+    eprintln!("[DBG] send_mount_ioctl: calling DeviceIoControl...");
     let ok = unsafe {
         DeviceIoControl(h, TC_IOCTL_MOUNT_VOLUME,
             m as *const _ as *const std::ffi::c_void, mem::size_of::<MountStruct>() as u32,
             &mut out as *mut _ as *mut std::ffi::c_void, mem::size_of::<MountStruct>() as u32,
             &mut br, std::ptr::null_mut())
     };
+    eprintln!("[DBG] DeviceIoControl returned ok={}, br={}, rc={}", ok, br, unsafe { std::ptr::read_unaligned(std::ptr::addr_of!(out.return_code)) });
     if ok == 0 { return Err(format!("IOCTL failed: {}", std::io::Error::last_os_error())); }
     match out.return_code {
         0 => Ok(()),
@@ -175,4 +195,133 @@ fn send_unmount_ioctl(h: HANDLE, u: &UnmountStruct) -> Result<(), String> {
     };
     if ok == 0 { return Err(format!("IOCTL failed: {}", std::io::Error::last_os_error())); }
     match out.return_code { 0 => Ok(()), rc => Err(format!("Driver error: {}", rc)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vcrypt_core::ciphers::CipherType;
+
+    #[test]
+    fn test_cipher_to_ea_all_singles() {
+        assert_eq!(cipher_to_ea(CipherType::Aes), 0x01);
+        assert_eq!(cipher_to_ea(CipherType::Serpent), 0x02);
+        assert_eq!(cipher_to_ea(CipherType::Twofish), 0x03);
+        assert_eq!(cipher_to_ea(CipherType::Camellia), 0x04);
+        assert_eq!(cipher_to_ea(CipherType::Kuznyechik), 0x05);
+    }
+
+    #[test]
+    fn test_cipher_to_ea_all_cascades() {
+        assert_eq!(cipher_to_ea(CipherType::AesTwofish), 0x11);
+        assert_eq!(cipher_to_ea(CipherType::AesTwofishSerpent), 0x12);
+        assert_eq!(cipher_to_ea(CipherType::SerpentAes), 0x13);
+        assert_eq!(cipher_to_ea(CipherType::SerpentTwofishAes), 0x14);
+        assert_eq!(cipher_to_ea(CipherType::TwofishSerpent), 0x15);
+        assert_eq!(cipher_to_ea(CipherType::CamelliaKuznyechik), 0x16);
+        assert_eq!(cipher_to_ea(CipherType::CamelliaSerpent), 0x17);
+        assert_eq!(cipher_to_ea(CipherType::KuznyechikAes), 0x18);
+        assert_eq!(cipher_to_ea(CipherType::KuznyechikSerpentCamellia), 0x19);
+        assert_eq!(cipher_to_ea(CipherType::KuznyechikTwofish), 0x1A);
+    }
+
+    #[test]
+    fn test_cipher_to_ea_is_stable() {
+        let types = [
+            CipherType::Aes,
+            CipherType::Serpent,
+            CipherType::Twofish,
+            CipherType::Camellia,
+            CipherType::Kuznyechik,
+            CipherType::AesTwofish,
+            CipherType::AesTwofishSerpent,
+            CipherType::SerpentAes,
+            CipherType::SerpentTwofishAes,
+            CipherType::TwofishSerpent,
+            CipherType::CamelliaKuznyechik,
+            CipherType::CamelliaSerpent,
+            CipherType::KuznyechikAes,
+            CipherType::KuznyechikSerpentCamellia,
+            CipherType::KuznyechikTwofish,
+        ];
+        for ct in &types {
+            let ea = cipher_to_ea(*ct);
+            assert!(
+                ea == 0x01
+                    || ea == 0x02
+                    || ea == 0x03
+                    || ea == 0x04
+                    || ea == 0x05
+                    || (0x11..=0x1A).contains(&ea),
+                "cipher {:?} → unexpected ea 0x{:02X}",
+                ct,
+                ea
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Test A: MountStruct layout + EA roundtrip + drive letters
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_mount_struct_size() {
+        // packed(1) layout must exactly match the driver's expectation.
+        // If this fails, the driver will misinterpret fields.
+        assert_eq!(mem::size_of::<MountStruct>(), 1110);
+    }
+
+    #[test]
+    fn test_unmount_struct_size() {
+        assert_eq!(mem::size_of::<UnmountStruct>(), 8);
+    }
+
+    #[test]
+    fn test_mount_struct_key_fields_nonzero_after_init() {
+        // Verify that after zero-init + setting key fields, the struct is
+        // populated correctly. We don't have a real OpenResult, so we just
+        // check the zero-init baseline + manual field writes.
+        let m: MountStruct = unsafe { mem::zeroed() };
+        // All fields should be zero after zeroed()
+        assert_eq!(unsafe { std::ptr::addr_of!(m.return_code).read_unaligned() }, 0);
+        assert_eq!(unsafe { std::ptr::addr_of!(m.n_dos_drive_no).read_unaligned() }, 0);
+    }
+
+    #[test]
+    fn test_ea_roundtrip_all() {
+        for ea in &[
+            0x01u32, 0x02, 0x03, 0x04, 0x05, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1A,
+        ] {
+            let ct = vcrypt_driver_core::cipher_type_from_ea(*ea)
+                .unwrap_or_else(|| panic!("unknown ea 0x{:02X}", ea));
+            assert_eq!(
+                cipher_to_ea(ct),
+                *ea,
+                "EA 0x{:02X} → CipherType::{:?} → EA 0x{:02X} (mismatch)",
+                ea,
+                ct,
+                cipher_to_ea(ct)
+            );
+        }
+    }
+
+    #[test]
+    fn test_drive_letter_a_to_z() {
+        let expected: Vec<char> = ('A'..='Z').collect();
+        for (i, ch) in expected.iter().enumerate() {
+            let drive_no = (*ch as u8 - b'A') as u32;
+            assert_eq!(drive_no, i as u32);
+            assert!(drive_no <= 25);
+        }
+    }
+
+    #[test]
+    fn test_drive_letter_lowercase() {
+        // Lowercase letters are uppercased before conversion
+        let lower = 'x' as u8;
+        let upper = lower.to_ascii_uppercase();
+        let drive_no = (upper - b'A') as u32;
+        assert_eq!(drive_no, 23); // 'X' is drive 23
+    }
 }

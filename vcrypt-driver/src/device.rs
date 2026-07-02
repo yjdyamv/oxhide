@@ -59,15 +59,9 @@ pub fn create_root_device(driver_object: *mut DRIVER_OBJECT) -> NTSTATUS {
 
 /// Process an IRP sent to the root control device.
 pub fn process_root_device_irp(_dev: *mut DEVICE_OBJECT, irp: *mut IRP) -> NTSTATUS {
-    debug::kdbg("[Oxhide] process_root_device_irp called\n");
     let major = unsafe { (*IoGetCurrentIrpStackLocation(irp)).MajorFunction };
     match major {
-        IRP_MJ_CREATE | IRP_MJ_CLOSE | IRP_MJ_CLEANUP => {
-            irp_utils::complete_irp(irp, STATUS_SUCCESS, 0);
-            STATUS_SUCCESS
-        }
         IRP_MJ_SHUTDOWN => {
-            // Unmount all volumes, then complete.
             mount::handle_unmount_all_volumes(irp)
         }
         IRP_MJ_DEVICE_CONTROL => process_root_device_ioctl(irp),

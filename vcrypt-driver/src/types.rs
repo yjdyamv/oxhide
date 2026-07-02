@@ -206,58 +206,13 @@ impl Default for VolumePropertiesStruct {
 // ---------------------------------------------------------------------------
 // Helpers for packed-struct field access (read/write through byte pointers).
 // ---------------------------------------------------------------------------
-/// Read a `u32` from a packed struct field by address (unaligned-safe).
-#[inline]
-pub unsafe fn read_packed_u32<T>(addr: *const T) -> u32 {
-    let p = addr as *const u8;
-    u32::from_le_bytes([*p, *p.add(1), *p.add(2), *p.add(3)])
-}
+// Packed-struct field access helpers — delegated to vcrypt-driver-core.
 
-/// Read a `u64` from a packed struct field by address (unaligned-safe).
-#[inline]
-pub unsafe fn read_packed_u64<T>(addr: *const T) -> u64 {
-    let p = addr as *const u8;
-    let mut b = [0u8; 8];
-    core::ptr::copy_nonoverlapping(p, b.as_mut_ptr(), 8);
-    u64::from_le_bytes(b)
-}
-
-/// Read an `i64` from a packed struct field by address (unaligned-safe).
-#[inline]
-pub unsafe fn read_packed_i64<T>(addr: *const T) -> i64 {
-    read_packed_u64(addr) as i64
-}
-
-/// Read a `u8` from a packed struct field by address.
-#[inline]
-pub unsafe fn read_packed_u8<T>(addr: *const T) -> u8 {
-    *(addr as *const u8)
-}
-
-/// Read an `i32` from a packed struct field by address (unaligned-safe).
-#[inline]
-pub unsafe fn read_packed_i32<T>(addr: *const T) -> i32 {
-    read_packed_u32(addr) as i32
-}
-
-/// Write an `i32` to a packed struct field by address (unaligned-safe).
-#[inline]
-pub unsafe fn write_packed_i32<T>(addr: *mut T, val: i32) {
-    let p = addr as *mut u8;
-    let b = val.to_le_bytes();
-    *p = b[0]; *p.add(1) = b[1]; *p.add(2) = b[2]; *p.add(3) = b[3];
-}
-
-/// Copy `src[..len]` into a packed `[u8; N]` field by address.
-#[inline]
-pub unsafe fn copy_into_packed<T>(addr: *mut T, src: &[u8], len: usize) {
-    let p = addr as *mut u8;
-    core::ptr::copy_nonoverlapping(src.as_ptr(), p, len);
-}
-
-/// Copy a UTF-16 buffer into a packed `[u16; N]` field by address (raw bytes).
-#[inline]
-pub unsafe fn copy_wide_into_packed<T>(addr: *mut T, src: *const u16, len_ch: usize) {
-    let p = addr as *mut u8;
-    core::ptr::copy_nonoverlapping(src as *const u8, p, len_ch * 2);
-}
+pub use vcrypt_driver_core::copy_into_packed;
+pub use vcrypt_driver_core::copy_wide_into_packed;
+pub use vcrypt_driver_core::read_packed_i32;
+pub use vcrypt_driver_core::read_packed_i64;
+pub use vcrypt_driver_core::read_packed_u32;
+pub use vcrypt_driver_core::read_packed_u64;
+pub use vcrypt_driver_core::read_packed_u8;
+pub use vcrypt_driver_core::write_packed_i32;

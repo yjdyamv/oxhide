@@ -8,13 +8,15 @@
 //! The struct definitions match VeraCrypt's `EncryptedIoQueue.h` so that a
 //! future phase can split this into the full 3-thread async queue without
 //! changing the public API shape.
+//!
+//! Sector alignment math and XTS encrypt/decrypt loops are delegated to
+//! `vcrypt_driver_core::sector_io` for testability.
 
 use crate::extension::Extension;
 use crate::irp_utils;
 use crate::wdk_bindings::*;
 use vcrypt_core::KernelSectorCipher;
-
-const ENCRYPTION_DATA_UNIT_SIZE: u64 = 512;
+use vcrypt_driver_core::sector_io;
 
 pub const TC_ENC_IO_QUEUE_MAX_FRAGMENT_SIZE: u32 = 256 * 1024;
 pub const TC_ENC_IO_QUEUE_PREALLOCATED_ITEM_COUNT: u32 = 8;
@@ -215,37 +217,43 @@ unsafe fn process_read_irp(queue: &EncryptedIoQueue, irp: *mut IRP) -> NTSTATUS 
     let voff = virtual_offset as u64;
     let l = length as u64;
 
-    if voff + l > ext.disk_length as u64 {
-        irp_utils::complete_disk_irp(irp, STATUS_INVALID_PARAMETER, 0);
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    let host_offset = ext.vol_data_area_offset + voff;
-    let aligned_off = (host_offset / ENCRYPTION_DATA_UNIT_SIZE) * ENCRYPTION_DATA_UNIT_SIZE;
-    let end_byte = host_offset + l;
-    let aligned_end = ((end_byte + ENCRYPTION_DATA_UNIT_SIZE - 1) / ENCRYPTION_DATA_UNIT_SIZE) * ENCRYPTION_DATA_UNIT_SIZE;
-    let buf_size = (aligned_end - aligned_off) as usize;
-    let sector_count = buf_size / ENCRYPTION_DATA_UNIT_SIZE as usize;
+    // Delegate alignment math to vcrypt-driver-core
+    let params = match sector_io::compute_sector_io_params(
+        ext.vol_data_area_offset,
+        ext.first_data_unit_no,
+        voff,
+        l,
+        ext.disk_length as u64,
+    ) {
+        Ok(p) => p,
+        Err(sector_io::SectorIoError::ZeroLength) => {
+            irp_utils::complete_disk_irp(irp, STATUS_SUCCESS, 0);
+            return STATUS_SUCCESS;
+        }
+        Err(_) => {
+            irp_utils::complete_disk_irp(irp, STATUS_INVALID_PARAMETER, 0);
+            return STATUS_INVALID_PARAMETER;
+        }
+    };
 
     let sector_buf = ExAllocatePool2(
         POOL_FLAG_NON_PAGED,
-        buf_size,
+        params.aligned_length as usize,
         u32::from_ne_bytes(*b"OxRd"),
     ) as *mut u8;
     if sector_buf.is_null() {
         irp_utils::complete_disk_irp(irp, STATUS_INSUFFICIENT_RESOURCES, 0);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    let sector_slice = core::slice::from_raw_parts_mut(sector_buf, buf_size);
 
     // Read from host file
-    let mut byte_offset = aligned_off as i64;
+    let mut byte_offset = params.aligned_host_offset as i64;
     let mut iosb: IO_STATUS_BLOCK = core::mem::zeroed();
     let status = ZwReadFile(
         ext.h_device_file,
         core::ptr::null_mut(), core::ptr::null_mut(), core::ptr::null_mut(),
         &mut iosb,
-        sector_buf as PVOID, buf_size as u32,
+        sector_buf as PVOID, params.aligned_length as u32,
         &mut byte_offset, core::ptr::null_mut(),
     );
     if !NT_SUCCESS(status) {
@@ -254,33 +262,40 @@ unsafe fn process_read_irp(queue: &EncryptedIoQueue, irp: *mut IRP) -> NTSTATUS 
         return status;
     }
 
-    // XTS decrypt each 512-byte sector
-    let base_unit = ext.first_data_unit_no + (aligned_off - ext.vol_data_area_offset) / ENCRYPTION_DATA_UNIT_SIZE;
-    for i in 0..sector_count {
-        let sd = &mut sector_slice[i * 512..(i + 1) * 512];
-        if let Err(_e) = cipher.decrypt_sector(base_unit + i as u64, sd) {
-            ExFreePool(sector_buf as PVOID);
-            irp_utils::complete_disk_irp(irp, STATUS_DISK_CORRUPT_ERROR, 0);
-            return STATUS_DISK_CORRUPT_ERROR;
-        }
+    let sector_slice =
+        core::slice::from_raw_parts_mut(sector_buf, params.aligned_length as usize);
+
+    // XTS decrypt via vcrypt-driver-core
+    if let Err(_e) = sector_io::decrypt_sectors(
+        cipher,
+        params.first_sector_index,
+        params.sector_count,
+        sector_slice,
+    ) {
+        ExFreePool(sector_buf as PVOID);
+        irp_utils::complete_disk_irp(irp, STATUS_DISK_CORRUPT_ERROR, 0);
+        return STATUS_DISK_CORRUPT_ERROR;
     }
 
     // Copy to user buffer
-    let user_off = (host_offset - aligned_off) as usize;
-    if !copy_to_user_buffer(irp, &sector_slice[user_off..user_off + l as usize]) {
+    if !copy_to_user_buffer(
+        irp,
+        &sector_slice[params.user_data_offset..params.user_data_offset + params.user_data_length],
+    ) {
         ExFreePool(sector_buf as PVOID);
         irp_utils::complete_disk_irp(irp, STATUS_INSUFFICIENT_RESOURCES, 0);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     ExFreePool(sector_buf as PVOID);
-    irp_utils::complete_disk_irp(irp, STATUS_SUCCESS, l as ULONG_PTR);
+    irp_utils::complete_disk_irp(irp, STATUS_SUCCESS, params.user_data_length as ULONG_PTR);
     STATUS_SUCCESS
 }
 
 // ===========================================================================
 // WRITE
 // ===========================================================================
+
 unsafe fn process_write_irp(queue: &EncryptedIoQueue, irp: *mut IRP) -> NTSTATUS {
     let device = queue.device_object;
     let ext = &*((*device).DeviceExtension as *const Extension);
@@ -292,10 +307,6 @@ unsafe fn process_write_irp(queue: &EncryptedIoQueue, irp: *mut IRP) -> NTSTATUS
     }
 
     let (virtual_offset, length) = irp_utils::get_write_params(irp);
-    if length == 0 {
-        irp_utils::complete_disk_irp(irp, STATUS_SUCCESS, 0);
-        return STATUS_SUCCESS;
-    }
     if virtual_offset < 0 {
         irp_utils::complete_disk_irp(irp, STATUS_INVALID_PARAMETER, 0);
         return STATUS_INVALID_PARAMETER;
@@ -303,37 +314,43 @@ unsafe fn process_write_irp(queue: &EncryptedIoQueue, irp: *mut IRP) -> NTSTATUS
     let voff = virtual_offset as u64;
     let l = length as u64;
 
-    if voff + l > ext.disk_length as u64 {
-        irp_utils::complete_disk_irp(irp, STATUS_INVALID_PARAMETER, 0);
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    let host_offset = ext.vol_data_area_offset + voff;
-    let aligned_off = (host_offset / ENCRYPTION_DATA_UNIT_SIZE) * ENCRYPTION_DATA_UNIT_SIZE;
-    let end_byte = host_offset + l;
-    let aligned_end = ((end_byte + ENCRYPTION_DATA_UNIT_SIZE - 1) / ENCRYPTION_DATA_UNIT_SIZE) * ENCRYPTION_DATA_UNIT_SIZE;
-    let buf_size = (aligned_end - aligned_off) as usize;
-    let sector_count = buf_size / ENCRYPTION_DATA_UNIT_SIZE as usize;
+    // Delegate alignment math to vcrypt-driver-core
+    let params = match sector_io::compute_sector_io_params(
+        ext.vol_data_area_offset,
+        ext.first_data_unit_no,
+        voff,
+        l,
+        ext.disk_length as u64,
+    ) {
+        Ok(p) => p,
+        Err(sector_io::SectorIoError::ZeroLength) => {
+            irp_utils::complete_disk_irp(irp, STATUS_SUCCESS, 0);
+            return STATUS_SUCCESS;
+        }
+        Err(_) => {
+            irp_utils::complete_disk_irp(irp, STATUS_INVALID_PARAMETER, 0);
+            return STATUS_INVALID_PARAMETER;
+        }
+    };
 
     let sector_buf = ExAllocatePool2(
         POOL_FLAG_NON_PAGED,
-        buf_size,
+        params.aligned_length as usize,
         u32::from_ne_bytes(*b"OxWr"),
     ) as *mut u8;
     if sector_buf.is_null() {
         irp_utils::complete_disk_irp(irp, STATUS_INSUFFICIENT_RESOURCES, 0);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    let sector_slice = core::slice::from_raw_parts_mut(sector_buf, buf_size);
 
     // Read existing encrypted sectors (read-modify-write)
-    let mut byte_offset = aligned_off as i64;
+    let mut byte_offset = params.aligned_host_offset as i64;
     let mut iosb: IO_STATUS_BLOCK = core::mem::zeroed();
     let read_status = ZwReadFile(
         ext.h_device_file,
         core::ptr::null_mut(), core::ptr::null_mut(), core::ptr::null_mut(),
         &mut iosb,
-        sector_buf as PVOID, buf_size as u32,
+        sector_buf as PVOID, params.aligned_length as u32,
         &mut byte_offset, core::ptr::null_mut(),
     );
     if !NT_SUCCESS(read_status) {
@@ -342,33 +359,40 @@ unsafe fn process_write_irp(queue: &EncryptedIoQueue, irp: *mut IRP) -> NTSTATUS
         return read_status;
     }
 
+    let sector_slice =
+        core::slice::from_raw_parts_mut(sector_buf, params.aligned_length as usize);
+
     // Overlay user data
-    let user_off = (host_offset - aligned_off) as usize;
-    if !copy_from_user_buffer(irp, &mut sector_slice[user_off..user_off + l as usize]) {
+    if !copy_from_user_buffer(
+        irp,
+        &mut sector_slice
+            [params.user_data_offset..params.user_data_offset + params.user_data_length],
+    ) {
         ExFreePool(sector_buf as PVOID);
         irp_utils::complete_disk_irp(irp, STATUS_INSUFFICIENT_RESOURCES, 0);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    // XTS encrypt each 512-byte sector
-    let base_unit = ext.first_data_unit_no + (aligned_off - ext.vol_data_area_offset) / ENCRYPTION_DATA_UNIT_SIZE;
-    for i in 0..sector_count {
-        let sd = &mut sector_slice[i * 512..(i + 1) * 512];
-        if let Err(_e) = cipher.encrypt_sector(base_unit + i as u64, sd) {
-            ExFreePool(sector_buf as PVOID);
-            irp_utils::complete_disk_irp(irp, STATUS_DISK_CORRUPT_ERROR, 0);
-            return STATUS_DISK_CORRUPT_ERROR;
-        }
+    // XTS encrypt via vcrypt-driver-core
+    if let Err(_e) = sector_io::encrypt_sectors(
+        cipher,
+        params.first_sector_index,
+        params.sector_count,
+        sector_slice,
+    ) {
+        ExFreePool(sector_buf as PVOID);
+        irp_utils::complete_disk_irp(irp, STATUS_DISK_CORRUPT_ERROR, 0);
+        return STATUS_DISK_CORRUPT_ERROR;
     }
 
     // Write back to host file
-    let mut w_offset = aligned_off as i64;
+    let mut w_offset = params.aligned_host_offset as i64;
     let mut w_iosb: IO_STATUS_BLOCK = core::mem::zeroed();
     let w_status = ZwWriteFile(
         ext.h_device_file,
         core::ptr::null_mut(), core::ptr::null_mut(), core::ptr::null_mut(),
         &mut w_iosb,
-        sector_buf as PVOID, buf_size as u32,
+        sector_buf as PVOID, params.aligned_length as u32,
         &mut w_offset, core::ptr::null_mut(),
     );
 
@@ -378,7 +402,7 @@ unsafe fn process_write_irp(queue: &EncryptedIoQueue, irp: *mut IRP) -> NTSTATUS
         return w_status;
     }
 
-    irp_utils::complete_disk_irp(irp, STATUS_SUCCESS, l as ULONG_PTR);
+    irp_utils::complete_disk_irp(irp, STATUS_SUCCESS, params.user_data_length as ULONG_PTR);
     STATUS_SUCCESS
 }
 
@@ -409,7 +433,7 @@ unsafe fn process_flush_irp(queue: &EncryptedIoQueue, irp: *mut IRP) -> NTSTATUS
 // Buffer mapping helpers
 // ===========================================================================
 
-/// Copy data from the sector buffer into the user’s buffer (MDL or SystemBuffer).
+/// Copy data from the sector buffer into the user's buffer (MDL or SystemBuffer).
 unsafe fn copy_to_user_buffer(irp: *mut IRP, data: &[u8]) -> bool {
     let mdl = (*irp).MdlAddress;
     if !mdl.is_null() {
@@ -429,7 +453,7 @@ unsafe fn copy_to_user_buffer(irp: *mut IRP, data: &[u8]) -> bool {
     false
 }
 
-/// Copy data from the user’s buffer (MDL or SystemBuffer) into the sector buffer.
+/// Copy data from the user's buffer (MDL or SystemBuffer) into the sector buffer.
 unsafe fn copy_from_user_buffer(irp: *mut IRP, data: &mut [u8]) -> bool {
     let mdl = (*irp).MdlAddress;
     if !mdl.is_null() {

@@ -26,8 +26,9 @@ pub unsafe fn open_host_file(
     exclusive_access: bool,
     preserve_timestamp: bool,
 ) -> NTSTATUS {
-    // Build \??\ prefix + volume path
-    let prefix: [u16; 4] = [0x5C, 0x3F, 0x3F, 0x5C]; // \??\
+    // The caller (VolumeThreadProc) has already prepended the `\??\` NT-path
+    // prefix, so use `volume_path` verbatim.  Mirrors VeraCrypt `TCOpenVolume`,
+    // which consumes `pwszMountVolume` as-is (Ntvol.c:92).
     let mut path_len = 0usize;
     while path_len < types::TC_MAX_PATH && *volume_path.add(path_len) != 0 {
         path_len += 1;
@@ -36,7 +37,7 @@ pub unsafe fn open_host_file(
         debug::kdbg("[Oxhide] open_host_file: empty path\n");
         return STATUS_INVALID_PARAMETER;
     }
-    let total_len = 4 + path_len;
+    let total_len = path_len;
     let buf_size = (total_len + 1) * 2;
     let path_buf = ExAllocatePool2(
         POOL_FLAG_NON_PAGED,
@@ -46,14 +47,15 @@ pub unsafe fn open_host_file(
     if path_buf.is_null() {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    core::ptr::copy_nonoverlapping(prefix.as_ptr(), path_buf, 4);
-    core::ptr::copy_nonoverlapping(volume_path, path_buf.add(4), path_len);
+    core::ptr::copy_nonoverlapping(volume_path, path_buf, path_len);
     *path_buf.add(total_len) = 0;
 
     let mut path_str = UNICODE_STRING::default();
     path_str.Length = (total_len * 2) as u16;
     path_str.MaximumLength = buf_size as u16;
     path_str.Buffer = path_buf;
+
+    debug::kdbg("[Oxhide] open_host_file: calling ZwCreateFile\n");
 
     // --- First attempt: RW open with FILE_NO_INTERMEDIATE_BUFFERING ---
     let mut oa: OBJECT_ATTRIBUTES = core::mem::zeroed();
@@ -89,6 +91,7 @@ pub unsafe fn open_host_file(
         core::ptr::null_mut(),
         0,
     );
+    debug::kdbg_status("[Oxhide] ZwCreateFile = ", status);
 
     // Map STATUS_ACCESS_DENIED / STATUS_SHARING_VIOLATION
     let is_ro = if !NT_SUCCESS(status) {
@@ -254,7 +257,6 @@ pub unsafe fn tc_open_volume(
     // --- Validate sector size ---
     const MAX_SECTOR_SIZE: u32 = 128 * 1024;
     if bytes_per_sector == 0 || bytes_per_sector > MAX_SECTOR_SIZE {
-        debug::kdbg("[Oxhide] tc_open_volume: invalid sector size\n");
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -267,7 +269,6 @@ pub unsafe fn tc_open_volume(
         preserve_timestamps,
     );
     if !NT_SUCCESS(open_status) {
-        debug::kdbg_status("[Oxhide] tc_open_volume: open failed", open_status);
         return open_status;
     }
 

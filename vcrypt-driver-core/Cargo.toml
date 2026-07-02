@@ -1,0 +1,21 @@
+[workspace]
+
+[package]
+name = "vcrypt-driver-core"
+version = "0.0.1"
+edition = "2021"
+description = "Pure no_std logic shared between vcrypt-driver (kernel) and test harnesses"
+
+[dependencies]
+vcrypt-core = { path = "../vcrypt-core", default-features = false, features = ["kernel"] }
+
+[dev-dependencies]
+hex = "0.4.3"
+proptest = "1"
+
+[patch.crates-io]
+lsx = { path = "../vcrypt-core/vendor/lsx" }
+
+[features]
+default = ["nightly"]
+nightly = []
